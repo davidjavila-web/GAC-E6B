@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.13";
+const APP_VERSION = "1.15";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -799,25 +799,23 @@ function parseScheduleText(text) {
   let curDate = null;
   const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
   const monthRe = new RegExp("\\b(" + monthNames.join("|") + ")\\s+(\\d{1,2})\\b", "i");
-  // Route: ICAO → ICAO (with various OCR arrow chars)
-  const routeRe = /\b([A-Z]{4})\s*[-=→>»➜➝]+\s*([A-Z]{4})\b/;
-  // Times: 0957L F 1330L or 0957L ⓕ 1330L or 0957L @ 1330L
-  // The "F" or symbol between times is a separator/fuel indicator
-  const timeLineRe = /\b(\d{4})L\b.*?\b(\d{4})L\b/;
-  // Standalone time line with just times
-  const timeOnlyRe = /(\d{4})L\s+[A-Z@ⓕ⛽F]\s+(\d{4})L/;
+  // Route: ICAO sep ICAO (very flexible separators for OCR)
+  const routeRe = /\b([A-Z]{4})\s*[+*&<=→>»➜➝\-–—=]+\s*([A-Z]{4})\b/;
+  // Times with L suffix: 0957L ... 1330L (various separators between)
+  const timeLineRe = /\b(\d{4})L\b[^A-Z]*?\b(\d{4})L?\b/;
+  // Times on separate line: 1100L -- 1145L or 1100L ... 1145L or 1100L ··· 1145L
+  const timeSepRe = /(\d{4})L?\s*[-–—·.]+\s*(\d{4})L?/;
   for (let i = 0; i < lines.length; i++) {
-    // Check for date headers: "SAT APR 11" or "APR 11" or "SUN APR 12"
-    const dm = lines[i].match(monthRe);
-    if (dm) {
+    // Check for date headers: "SAT APR 11" or "APR 11" or "APR 21 APR 22" (multi-col: take first)
+    const dateMatches = [...lines[i].matchAll(new RegExp("\\b(" + monthNames.join("|") + ")\\s+(\\d{1,2})\\b", "gi"))];
+    if (dateMatches.length > 0) {
       curDate = {
-        day: Number(dm[2]),
-        month: dm[1].toUpperCase(),
+        day: Number(dateMatches[0][2]),
+        month: dateMatches[0][1].toUpperCase(),
         year2: 25
       };
-      continue;
     }
-    // Check for route line
+    // Check for route
     const rm = lines[i].match(routeRe);
     if (!rm) continue;
     const origin = rm[1],
@@ -827,25 +825,19 @@ function parseScheduleText(text) {
       arrH = 0,
       arrM = 0,
       foundTimes = false;
-    // Look for times on the same line
-    let tm = lines[i].match(timeLineRe);
-    if (tm) {
-      depH = Math.floor(Number(tm[1]) / 100);
-      depM = Number(tm[1]) % 100;
-      arrH = Math.floor(Number(tm[2]) / 100);
-      arrM = Number(tm[2]) % 100;
-      foundTimes = true;
-    }
-    // Look for times on adjacent lines (before or after route)
-    if (!foundTimes) {
-      for (let j = Math.max(0, i - 1); j <= Math.min(i + 2, lines.length - 1); j++) {
-        if (j === i) continue;
-        tm = lines[j].match(timeLineRe) || lines[j].match(timeOnlyRe);
-        if (tm) {
-          depH = Math.floor(Number(tm[1]) / 100);
-          depM = Number(tm[1]) % 100;
-          arrH = Math.floor(Number(tm[2]) / 100);
-          arrM = Number(tm[2]) % 100;
+    // Look for times on same line or adjacent lines
+    for (let j = Math.max(0, i - 2); j <= Math.min(i + 2, lines.length - 1); j++) {
+      const ln = lines[j];
+      let tm = ln.match(timeLineRe) || ln.match(timeSepRe);
+      if (tm) {
+        const t1 = Number(tm[1]),
+          t2 = Number(tm[2]);
+        // Validate: both should be valid times (0000-2359)
+        if (t1 <= 2359 && t2 <= 2359 && t1 % 100 < 60 && t2 % 100 < 60) {
+          depH = Math.floor(t1 / 100);
+          depM = t1 % 100;
+          arrH = Math.floor(t2 / 100);
+          arrM = t2 % 100;
           foundTimes = true;
           break;
         }
@@ -5498,66 +5490,115 @@ function BrakeCalc() {
 // ── 10/24 Trip Parser ────────────────────────────────────────────────────
 // ── OCR-aware duty schedule parser ───────────────────────────────────────
 function parseOcrDutyTrip(text) {
-  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+  // Clean up common OCR artifacts
+  let cleaned = text.replace(/[""]/g, '"').replace(/['']/g, "'") // normalize quotes
+  .replace(/(\d):(\d)["']/g, '$1:$2') // fix 01:1" → 01:1
+  .replace(/\|/g, 'l'); // pipe → l
+  const lines = cleaned.split(/\n/).map(l => l.trim()).filter(Boolean);
   if (lines.length < 2) return null;
   const legs = [];
   let curDate = null;
   const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-  // Scan for route lines: "HH:MM ICAO →/->/-»/=> ICAO HH:MM"
-  const routeLineRe = /(\d{1,2}:\d{2})\s+([A-Z]{4})\s*[-=→>»]+\s*([A-Z]{4})\s+(\d{1,2}:\d{2})/;
+  const monthRe = new RegExp("\\b(" + monthNames.join("|") + ")\\b", "i");
+
+  // Very flexible route match: time ICAO (separator) ICAO time
+  // Separators: +, *, >, →, -, =, », ➜, or combos, even single chars OCR might produce
+  // Times: HH:MM or HHMM (3-4 digits)
+  function findRoute(line) {
+    // Strip junk prefixes (OCR artifacts like ", er", ", an", "on")
+    const stripped = line.replace(/^[^0-9A-Z]*\s*/i, "");
+    // Try pattern: TIME ICAO sep ICAO TIME
+    const m = stripped.match(/(\d{1,2}:?\d{2})\s+([A-Z]{4})\s*[+*>→»=\-–—]+\s*([A-Z]{4})\s+(\d{1,2}:?\d{2})/);
+    if (m) return {
+      depRaw: m[1],
+      origin: m[2],
+      dest: m[3],
+      arrRaw: m[4]
+    };
+    // Try looser: just ICAO sep ICAO anywhere in line, with times nearby
+    const m2 = stripped.match(/([A-Z]{4})\s*[+*>→»=\-–—]+\s*([A-Z]{4})/);
+    if (m2) {
+      const times = stripped.match(/\b(\d{1,2}:?\d{2})\b/g);
+      if (times && times.length >= 2) return {
+        depRaw: times[0],
+        origin: m2[1],
+        dest: m2[2],
+        arrRaw: times[1]
+      };
+    }
+    return null;
+  }
+  function parseTime(raw) {
+    if (!raw) return {
+      h: 0,
+      m: 0
+    };
+    const s = raw.replace(/[^0-9:]/g, "");
+    if (s.includes(":")) {
+      const p = s.split(":");
+      return {
+        h: Number(p[0]),
+        m: Number(p[1] || 0)
+      };
+    }
+    // No colon: HHMM or HMM
+    if (s.length >= 4) return {
+      h: Number(s.slice(0, -2)),
+      m: Number(s.slice(-2))
+    };
+    if (s.length === 3) return {
+      h: Number(s[0]),
+      m: Number(s.slice(1))
+    };
+    return {
+      h: Number(s),
+      m: 0
+    };
+  }
   const flightTimeRe = /\((\d+):(\d{2})\)/;
   const dutyRe = /Duty:\s*(\d+):(\d{2})/i;
   const flightRe = /Flight:\s*(\d+):(\d{2})/i;
   const restRe = /Rest:\s*(\d+):(\d{2})/i;
-  const monthRe = new RegExp("\\b(" + monthNames.join("|") + ")\\b", "i");
-  const dayRe = /\b(\d{1,2})\b/;
   for (let i = 0; i < lines.length; i++) {
-    // Try to find date before route (look at nearby lines)
-    for (let d = Math.max(0, i - 3); d <= i; d++) {
-      const mMatch = lines[d].match(monthRe);
-      if (mMatch) {
-        const month = mMatch[1].toUpperCase();
-        // Find day number nearby
-        for (let dd = Math.max(0, d - 2); dd <= Math.min(d + 2, lines.length - 1); dd++) {
-          const stripped = lines[dd].replace(monthRe, "").replace(/[^0-9\s]/g, "").trim();
-          const nums = stripped.match(/\b(\d{1,2})\b/g);
-          if (nums) {
-            for (const n of nums) {
-              const nv = Number(n);
-              if (nv >= 1 && nv <= 31) {
-                curDate = {
-                  day: nv,
-                  month,
-                  year2: 25
-                };
-                break;
-              }
+    // Check for date: look for month name + nearby day number
+    const mMatch = lines[i].match(monthRe);
+    if (mMatch) {
+      const month = mMatch[1].toUpperCase();
+      // Find day number on same line or adjacent
+      for (let dd = Math.max(0, i - 1); dd <= Math.min(i + 1, lines.length - 1); dd++) {
+        const nums = lines[dd].replace(monthRe, "").match(/\b(\d{1,2})\b/g);
+        if (nums) {
+          for (const n of nums) {
+            const nv = Number(n);
+            if (nv >= 1 && nv <= 31) {
+              curDate = {
+                day: nv,
+                month,
+                year2: 25
+              };
+              break;
             }
           }
         }
       }
     }
-    // Match route line
-    const rm = lines[i].match(routeLineRe);
-    if (!rm) continue;
-    const depTime = rm[1],
-      origin = rm[2],
-      dest = rm[3],
-      arrTime = rm[4];
-    const depParts = depTime.split(":"),
-      arrParts = arrTime.split(":");
-    const depH = Number(depParts[0]),
-      depM = Number(depParts[1]);
-    const arrH = Number(arrParts[0]),
-      arrM = Number(arrParts[1]);
+
+    // Try to find a route on this line
+    const route = findRoute(lines[i]);
+    if (!route) continue;
+    const dep = parseTime(route.depRaw),
+      arr = parseTime(route.arrRaw);
     let flightMins = null,
       hasRest = false,
       restMins = null;
-    // Scan ahead for flight time, duty, rest
-    for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
-      if (routeLineRe.test(lines[j])) break;
+
+    // Scan nearby lines for flight time, duty, rest
+    for (let j = i - 1; j <= Math.min(i + 5, lines.length - 1); j++) {
+      if (j < 0 || j === i) continue;
+      // Don't cross into another route
+      if (j > i && findRoute(lines[j])) break;
       const ftm = lines[j].match(flightTimeRe);
-      if (ftm) flightMins = Number(ftm[1]) * 60 + Number(ftm[2]);
+      if (ftm && !flightMins) flightMins = Number(ftm[1]) * 60 + Number(ftm[2]);
       const frm = lines[j].match(flightRe);
       if (frm && !flightMins) flightMins = Number(frm[1]) * 60 + Number(frm[2]);
       const rrm = lines[j].match(restRe);
@@ -5566,18 +5607,21 @@ function parseOcrDutyTrip(text) {
         restMins = Number(rrm[1]) * 60 + Number(rrm[2]);
       }
     }
+    // Also check the line before this route for Rest (it belongs to the previous leg)
+    // and the Duty/Flight/Rest line AFTER the flight time parens for this leg
+
     if (!flightMins) {
-      let ft = arrH * 60 + arrM - (depH * 60 + depM);
+      let ft = arr.h * 60 + arr.m - (dep.h * 60 + dep.m);
       if (ft < 0) ft += 1440;
       flightMins = ft;
     }
     legs.push({
-      origin,
-      dest,
-      depH,
-      depM,
-      arrH,
-      arrM,
+      origin: route.origin,
+      dest: route.dest,
+      depH: dep.h,
+      depM: dep.m,
+      arrH: arr.h,
+      arrM: arr.m,
       flightMins,
       hasRest,
       restMins,
@@ -5585,6 +5629,27 @@ function parseOcrDutyTrip(text) {
         ...curDate
       } : null
     });
+  }
+
+  // Assign Rest from Duty/Flight/Rest lines that appear AFTER legs
+  // Rest line after a leg means that leg ends a duty period
+  for (let i = 0; i < lines.length; i++) {
+    const rrm = lines[i].match(restRe);
+    if (!rrm) continue;
+    // Find which leg this rest belongs to — it's the last leg found BEFORE this line
+    let lastLegIdx = -1;
+    for (let li = 0; li < legs.length; li++) {
+      // Find the line index of this leg in the original text
+      for (let j = 0; j < lines.length; j++) {
+        if (j >= i) break;
+        const route = findRoute(lines[j]);
+        if (route && route.origin === legs[li].origin && route.dest === legs[li].dest) lastLegIdx = li;
+      }
+    }
+    if (lastLegIdx >= 0) {
+      legs[lastLegIdx].hasRest = true;
+      legs[lastLegIdx].restMins = Number(rrm[1]) * 60 + Number(rrm[2]);
+    }
   }
   if (legs.length === 0) return null;
   return {
@@ -6535,7 +6600,19 @@ function FlightDutyCalc() {
       e.currentTarget.style.borderColor = C.accent;
       e.currentTarget.style.background = C.accent + "08";
     }
-  }, "\uD83D\uDCCB Tap here, then long-press \u2192 Paste screenshot"), importing && /*#__PURE__*/React.createElement("div", {
+  }, "\uD83D\uDCCB Tap here, then long-press \u2192 Paste screenshot"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: C.muted,
+      textAlign: "center",
+      marginTop: 6,
+      lineHeight: 1.4
+    }
+  }, "\uD83D\uDCA1 For crew schedules, crop to ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 700
+    }
+  }, "one column/day"), " for best results"), importing && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 8,
       fontSize: 12,
