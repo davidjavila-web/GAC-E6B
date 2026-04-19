@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.11";
+const APP_VERSION = "1.13";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -791,6 +791,92 @@ function visionResultToLegs(arr) {
     needDate: !legs[0].date
   };
 }
+// ── Crew schedule calendar parser (multi-column day view) ────────────────
+function parseScheduleText(text) {
+  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 3) return [];
+  const legs = [];
+  let curDate = null;
+  const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const monthRe = new RegExp("\\b(" + monthNames.join("|") + ")\\s+(\\d{1,2})\\b", "i");
+  // Route: ICAO → ICAO (with various OCR arrow chars)
+  const routeRe = /\b([A-Z]{4})\s*[-=→>»➜➝]+\s*([A-Z]{4})\b/;
+  // Times: 0957L F 1330L or 0957L ⓕ 1330L or 0957L @ 1330L
+  // The "F" or symbol between times is a separator/fuel indicator
+  const timeLineRe = /\b(\d{4})L\b.*?\b(\d{4})L\b/;
+  // Standalone time line with just times
+  const timeOnlyRe = /(\d{4})L\s+[A-Z@ⓕ⛽F]\s+(\d{4})L/;
+  for (let i = 0; i < lines.length; i++) {
+    // Check for date headers: "SAT APR 11" or "APR 11" or "SUN APR 12"
+    const dm = lines[i].match(monthRe);
+    if (dm) {
+      curDate = {
+        day: Number(dm[2]),
+        month: dm[1].toUpperCase(),
+        year2: 25
+      };
+      continue;
+    }
+    // Check for route line
+    const rm = lines[i].match(routeRe);
+    if (!rm) continue;
+    const origin = rm[1],
+      dest = rm[2];
+    let depH = 0,
+      depM = 0,
+      arrH = 0,
+      arrM = 0,
+      foundTimes = false;
+    // Look for times on the same line
+    let tm = lines[i].match(timeLineRe);
+    if (tm) {
+      depH = Math.floor(Number(tm[1]) / 100);
+      depM = Number(tm[1]) % 100;
+      arrH = Math.floor(Number(tm[2]) / 100);
+      arrM = Number(tm[2]) % 100;
+      foundTimes = true;
+    }
+    // Look for times on adjacent lines (before or after route)
+    if (!foundTimes) {
+      for (let j = Math.max(0, i - 1); j <= Math.min(i + 2, lines.length - 1); j++) {
+        if (j === i) continue;
+        tm = lines[j].match(timeLineRe) || lines[j].match(timeOnlyRe);
+        if (tm) {
+          depH = Math.floor(Number(tm[1]) / 100);
+          depM = Number(tm[1]) % 100;
+          arrH = Math.floor(Number(tm[2]) / 100);
+          arrM = Number(tm[2]) % 100;
+          foundTimes = true;
+          break;
+        }
+      }
+    }
+    if (!foundTimes) continue;
+    let flightMins = arrH * 60 + arrM - (depH * 60 + depM);
+    if (flightMins < 0) flightMins += 1440;
+    legs.push({
+      origin,
+      dest,
+      depH,
+      depM,
+      arrH,
+      arrM,
+      flightMins,
+      from: origin,
+      to: dest,
+      hasRest: false,
+      restMins: null,
+      date: curDate ? {
+        ...curDate
+      } : null,
+      distNm: null,
+      plannedBurnLbs: null,
+      cruiseAltFt: null
+    });
+  }
+  return legs;
+}
+
 // ── OCR-aware trip parser (handles Tesseract output from ARINCDirect) ────
 function parseOcrTripText(text) {
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
@@ -870,9 +956,11 @@ function parseOcrTripText(text) {
   return legs.length > 0 ? legs : [];
 }
 function parseTripText(text) {
-  // Try OCR format first, fall back to original
+  // Try OCR format first, fall back to schedule, then original
   const ocrResult = parseOcrTripText(text);
   if (ocrResult && ocrResult.length > 0) return ocrResult;
+  const schedResult = parseScheduleText(text);
+  if (schedResult && schedResult.length > 0) return schedResult;
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
   const routeRe = /^([A-Z]{4})\s*[\u2192\->]+\s*([A-Z]{4})$/;
   const legs = [];
@@ -5408,6 +5496,102 @@ function BrakeCalc() {
 }
 
 // ── 10/24 Trip Parser ────────────────────────────────────────────────────
+// ── OCR-aware duty schedule parser ───────────────────────────────────────
+function parseOcrDutyTrip(text) {
+  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return null;
+  const legs = [];
+  let curDate = null;
+  const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  // Scan for route lines: "HH:MM ICAO →/->/-»/=> ICAO HH:MM"
+  const routeLineRe = /(\d{1,2}:\d{2})\s+([A-Z]{4})\s*[-=→>»]+\s*([A-Z]{4})\s+(\d{1,2}:\d{2})/;
+  const flightTimeRe = /\((\d+):(\d{2})\)/;
+  const dutyRe = /Duty:\s*(\d+):(\d{2})/i;
+  const flightRe = /Flight:\s*(\d+):(\d{2})/i;
+  const restRe = /Rest:\s*(\d+):(\d{2})/i;
+  const monthRe = new RegExp("\\b(" + monthNames.join("|") + ")\\b", "i");
+  const dayRe = /\b(\d{1,2})\b/;
+  for (let i = 0; i < lines.length; i++) {
+    // Try to find date before route (look at nearby lines)
+    for (let d = Math.max(0, i - 3); d <= i; d++) {
+      const mMatch = lines[d].match(monthRe);
+      if (mMatch) {
+        const month = mMatch[1].toUpperCase();
+        // Find day number nearby
+        for (let dd = Math.max(0, d - 2); dd <= Math.min(d + 2, lines.length - 1); dd++) {
+          const stripped = lines[dd].replace(monthRe, "").replace(/[^0-9\s]/g, "").trim();
+          const nums = stripped.match(/\b(\d{1,2})\b/g);
+          if (nums) {
+            for (const n of nums) {
+              const nv = Number(n);
+              if (nv >= 1 && nv <= 31) {
+                curDate = {
+                  day: nv,
+                  month,
+                  year2: 25
+                };
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+    // Match route line
+    const rm = lines[i].match(routeLineRe);
+    if (!rm) continue;
+    const depTime = rm[1],
+      origin = rm[2],
+      dest = rm[3],
+      arrTime = rm[4];
+    const depParts = depTime.split(":"),
+      arrParts = arrTime.split(":");
+    const depH = Number(depParts[0]),
+      depM = Number(depParts[1]);
+    const arrH = Number(arrParts[0]),
+      arrM = Number(arrParts[1]);
+    let flightMins = null,
+      hasRest = false,
+      restMins = null;
+    // Scan ahead for flight time, duty, rest
+    for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+      if (routeLineRe.test(lines[j])) break;
+      const ftm = lines[j].match(flightTimeRe);
+      if (ftm) flightMins = Number(ftm[1]) * 60 + Number(ftm[2]);
+      const frm = lines[j].match(flightRe);
+      if (frm && !flightMins) flightMins = Number(frm[1]) * 60 + Number(frm[2]);
+      const rrm = lines[j].match(restRe);
+      if (rrm) {
+        hasRest = true;
+        restMins = Number(rrm[1]) * 60 + Number(rrm[2]);
+      }
+    }
+    if (!flightMins) {
+      let ft = arrH * 60 + arrM - (depH * 60 + depM);
+      if (ft < 0) ft += 1440;
+      flightMins = ft;
+    }
+    legs.push({
+      origin,
+      dest,
+      depH,
+      depM,
+      arrH,
+      arrM,
+      flightMins,
+      hasRest,
+      restMins,
+      date: curDate ? {
+        ...curDate
+      } : null
+    });
+  }
+  if (legs.length === 0) return null;
+  return {
+    legs,
+    needDate: !legs[0].date
+  };
+}
 function parseDutyTrip(text) {
   const raw = text.split(/\n/).map(l => l.trim());
   const lines = raw.filter(Boolean);
@@ -5545,7 +5729,18 @@ function parseDutyTrip(text) {
     });
     i = j;
   }
-  if (legs.length === 0) return null;
+  if (legs.length === 0) {
+    // Try OCR-aware parser as fallback
+    const ocrResult = parseOcrDutyTrip(text);
+    if (ocrResult) return ocrResult;
+    // Try schedule calendar parser
+    const schedResult = parseScheduleText(text);
+    if (schedResult && schedResult.length > 0) return {
+      legs: schedResult,
+      needDate: !schedResult[0].date
+    };
+    return null;
+  }
   return {
     legs,
     needDate: !legs[0].date
