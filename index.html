@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.15";
+const APP_VERSION = "1.16";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -791,83 +791,6 @@ function visionResultToLegs(arr) {
     needDate: !legs[0].date
   };
 }
-// ── Crew schedule calendar parser (multi-column day view) ────────────────
-function parseScheduleText(text) {
-  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
-  if (lines.length < 3) return [];
-  const legs = [];
-  let curDate = null;
-  const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-  const monthRe = new RegExp("\\b(" + monthNames.join("|") + ")\\s+(\\d{1,2})\\b", "i");
-  // Route: ICAO sep ICAO (very flexible separators for OCR)
-  const routeRe = /\b([A-Z]{4})\s*[+*&<=→>»➜➝\-–—=]+\s*([A-Z]{4})\b/;
-  // Times with L suffix: 0957L ... 1330L (various separators between)
-  const timeLineRe = /\b(\d{4})L\b[^A-Z]*?\b(\d{4})L?\b/;
-  // Times on separate line: 1100L -- 1145L or 1100L ... 1145L or 1100L ··· 1145L
-  const timeSepRe = /(\d{4})L?\s*[-–—·.]+\s*(\d{4})L?/;
-  for (let i = 0; i < lines.length; i++) {
-    // Check for date headers: "SAT APR 11" or "APR 11" or "APR 21 APR 22" (multi-col: take first)
-    const dateMatches = [...lines[i].matchAll(new RegExp("\\b(" + monthNames.join("|") + ")\\s+(\\d{1,2})\\b", "gi"))];
-    if (dateMatches.length > 0) {
-      curDate = {
-        day: Number(dateMatches[0][2]),
-        month: dateMatches[0][1].toUpperCase(),
-        year2: 25
-      };
-    }
-    // Check for route
-    const rm = lines[i].match(routeRe);
-    if (!rm) continue;
-    const origin = rm[1],
-      dest = rm[2];
-    let depH = 0,
-      depM = 0,
-      arrH = 0,
-      arrM = 0,
-      foundTimes = false;
-    // Look for times on same line or adjacent lines
-    for (let j = Math.max(0, i - 2); j <= Math.min(i + 2, lines.length - 1); j++) {
-      const ln = lines[j];
-      let tm = ln.match(timeLineRe) || ln.match(timeSepRe);
-      if (tm) {
-        const t1 = Number(tm[1]),
-          t2 = Number(tm[2]);
-        // Validate: both should be valid times (0000-2359)
-        if (t1 <= 2359 && t2 <= 2359 && t1 % 100 < 60 && t2 % 100 < 60) {
-          depH = Math.floor(t1 / 100);
-          depM = t1 % 100;
-          arrH = Math.floor(t2 / 100);
-          arrM = t2 % 100;
-          foundTimes = true;
-          break;
-        }
-      }
-    }
-    if (!foundTimes) continue;
-    let flightMins = arrH * 60 + arrM - (depH * 60 + depM);
-    if (flightMins < 0) flightMins += 1440;
-    legs.push({
-      origin,
-      dest,
-      depH,
-      depM,
-      arrH,
-      arrM,
-      flightMins,
-      from: origin,
-      to: dest,
-      hasRest: false,
-      restMins: null,
-      date: curDate ? {
-        ...curDate
-      } : null,
-      distNm: null,
-      plannedBurnLbs: null,
-      cruiseAltFt: null
-    });
-  }
-  return legs;
-}
 
 // ── OCR-aware trip parser (handles Tesseract output from ARINCDirect) ────
 function parseOcrTripText(text) {
@@ -951,8 +874,6 @@ function parseTripText(text) {
   // Try OCR format first, fall back to schedule, then original
   const ocrResult = parseOcrTripText(text);
   if (ocrResult && ocrResult.length > 0) return ocrResult;
-  const schedResult = parseScheduleText(text);
-  if (schedResult && schedResult.length > 0) return schedResult;
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
   const routeRe = /^([A-Z]{4})\s*[\u2192\->]+\s*([A-Z]{4})$/;
   const legs = [];
@@ -5798,12 +5719,6 @@ function parseDutyTrip(text) {
     // Try OCR-aware parser as fallback
     const ocrResult = parseOcrDutyTrip(text);
     if (ocrResult) return ocrResult;
-    // Try schedule calendar parser
-    const schedResult = parseScheduleText(text);
-    if (schedResult && schedResult.length > 0) return {
-      legs: schedResult,
-      needDate: !schedResult[0].date
-    };
     return null;
   }
   return {
@@ -6600,19 +6515,7 @@ function FlightDutyCalc() {
       e.currentTarget.style.borderColor = C.accent;
       e.currentTarget.style.background = C.accent + "08";
     }
-  }, "\uD83D\uDCCB Tap here, then long-press \u2192 Paste screenshot"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10,
-      color: C.muted,
-      textAlign: "center",
-      marginTop: 6,
-      lineHeight: 1.4
-    }
-  }, "\uD83D\uDCA1 For crew schedules, crop to ", /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontWeight: 700
-    }
-  }, "one column/day"), " for best results"), importing && /*#__PURE__*/React.createElement("div", {
+  }, "\uD83D\uDCCB Tap here, then long-press \u2192 Paste screenshot"), importing && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 8,
       fontSize: 12,
