@@ -333,7 +333,7 @@ function loadTesseract(cb) {
   }
   _tesseractLoading = true;
   const s = document.createElement("script");
-  s.src = "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js";
+  s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@v5.1.1/dist/tesseract.min.js";
   s.onload = () => {
     _tesseractLoading = false;
     cb(!!window.Tesseract);
@@ -387,17 +387,17 @@ async function ocrFromDataUrl(dataUrl, onProgress) {
   ctx.putImageData(imgData, 0, 0);
   const processedUrl = canvas.toDataURL("image/png");
   if (onProgress) onProgress("Running OCR (first time may take a moment)...");
+  // Use jsdelivr CDN with directory path (not specific file)
   const worker = await window.Tesseract.createWorker("eng", 1, {
-    workerPath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js",
-    corePath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js-core/5.1.1/tesseract-core.wasm.js"
+    workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@v5.1.1/dist/worker.min.js",
+    corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@v5.1.1"
   });
-  const {
-    data: {
-      text
-    }
-  } = await worker.recognize(processedUrl);
+  // Add timeout
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("OCR timed out after 60s")), 60000));
+  const recognize = worker.recognize(processedUrl);
+  const result = await Promise.race([recognize, timeout]);
   await worker.terminate();
-  return text;
+  return result.data.text;
 }
 async function ocrFromFile(file, onProgress) {
   const dataUrl = await new Promise((res, rej) => {
