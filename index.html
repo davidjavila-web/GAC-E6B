@@ -314,6 +314,100 @@ function useWide(bp = 768) {
   }, [bp]);
   return wide;
 }
+
+// ── Global Tesseract OCR ─────────────────────────────────────────────────
+let _tesseractLoading = false;
+function loadTesseract(cb) {
+  if (window.Tesseract) {
+    cb(true);
+    return;
+  }
+  if (_tesseractLoading) {
+    const iv = setInterval(() => {
+      if (window.Tesseract) {
+        clearInterval(iv);
+        cb(true);
+      }
+    }, 200);
+    return;
+  }
+  _tesseractLoading = true;
+  const s = document.createElement("script");
+  s.src = "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js";
+  s.onload = () => {
+    _tesseractLoading = false;
+    cb(!!window.Tesseract);
+  };
+  s.onerror = () => {
+    _tesseractLoading = false;
+    cb(false);
+  };
+  document.head.appendChild(s);
+}
+async function ocrFromDataUrl(dataUrl, onProgress) {
+  if (!window.Tesseract) throw new Error("OCR engine not loaded");
+  if (onProgress) onProgress("Preparing image...");
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error("Cannot load image"));
+    i.src = dataUrl;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0);
+  // Detect if dark background — sample top-left corner
+  const sample = ctx.getImageData(0, 0, Math.min(50, img.width), Math.min(50, img.height));
+  let avgBrightness = 0;
+  for (let i = 0; i < sample.data.length; i += 4) avgBrightness += (sample.data[i] + sample.data[i + 1] + sample.data[i + 2]) / 3;
+  avgBrightness /= sample.data.length / 4;
+  // If dark bg (< 128), invert for OCR
+  if (avgBrightness < 128) {
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = 255 - d[i];
+      d[i + 1] = 255 - d[i + 1];
+      d[i + 2] = 255 - d[i + 2];
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }
+  // Increase contrast
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const dd = imgData.data;
+  for (let i = 0; i < dd.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      let v = dd[i + c];
+      v = ((v / 255 - 0.5) * 1.5 + 0.5) * 255;
+      dd[i + c] = Math.max(0, Math.min(255, v));
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  const processedUrl = canvas.toDataURL("image/png");
+  if (onProgress) onProgress("Running OCR (first time may take a moment)...");
+  const worker = await window.Tesseract.createWorker("eng", 1, {
+    workerPath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js",
+    corePath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js-core/5.1.1/tesseract-core.wasm.js"
+  });
+  const {
+    data: {
+      text
+    }
+  } = await worker.recognize(processedUrl);
+  await worker.terminate();
+  return text;
+}
+async function ocrFromFile(file, onProgress) {
+  const dataUrl = await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = e => res(e.target.result);
+    r.onerror = () => rej(new Error("Cannot read file"));
+    r.readAsDataURL(file);
+  });
+  return ocrFromDataUrl(dataUrl, onProgress);
+}
 async function store(k, v) {
   try {
     localStorage.setItem(k, JSON.stringify(v));
@@ -5599,55 +5693,16 @@ function FlightDutyCalc() {
   const [ocrReady, setOcrReady] = useState(false);
   const [ocrBusy, setOcrBusy] = useState(false);
   useEffect(() => {
-    if (window.Tesseract) {
-      setOcrReady(true);
-      return;
-    }
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js";
-    s.onload = () => {
-      if (window.Tesseract) setOcrReady(true);
-    };
-    document.head.appendChild(s);
+    loadTesseract(ok => setOcrReady(ok));
   }, []);
   async function ocrReadImage(dataUrl) {
-    if (!window.Tesseract) throw new Error("OCR engine not loaded");
     setOcrBusy(true);
-    setImportMsg("Preparing image...");
-    // Invert colors for OCR (dark bg → white, light text → dark)
-    const img = await new Promise((res, rej) => {
-      const i = new Image();
-      i.onload = () => res(i);
-      i.onerror = () => rej(new Error("Cannot load image"));
-      i.src = dataUrl;
-    });
-    const canvas = document.createElement("canvas");
-    canvas.width = img.width;
-    canvas.height = img.height;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const d = imageData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      d[i] = 255 - d[i];
-      d[i + 1] = 255 - d[i + 1];
-      d[i + 2] = 255 - d[i + 2];
+    try {
+      const text = await ocrFromDataUrl(dataUrl, msg => setImportMsg(msg));
+      return text;
+    } finally {
+      setOcrBusy(false);
     }
-    ctx.putImageData(imageData, 0, 0);
-    const invertedUrl = canvas.toDataURL("image/png");
-    setImportMsg("Running OCR (first time may take a moment)...");
-    const worker = await window.Tesseract.createWorker("eng", 1, {
-      workerPath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/worker.min.js",
-      corePath: "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js-core/5.1.1/tesseract-core.wasm.js"
-    });
-    const {
-      data: {
-        text
-      }
-    } = await worker.recognize(invertedUrl);
-    await worker.terminate();
-    setOcrBusy(false);
-    return text;
   }
   async function handleOcrRead() {
     if (!pastedImg) return;
@@ -5765,40 +5820,41 @@ function FlightDutyCalc() {
     setImporting(true);
     setParseError("");
     try {
-      setImportMsg("Compressing image...");
-      const res = await imageToCleanJpeg(file, 1200);
-      setImportMsg("AI reading trip schedule (" + res.size + "KB)...");
-      let visionResult = null;
-      try {
-        visionResult = await parseDutyImageViaAPI(res.b64);
-      } catch (apiErr) {
-        const msg = apiErr.message || "Unknown error";
-        const isNetwork = msg.includes("Network") || msg.includes("Failed to fetch") || msg.includes("unreachable");
-        setImportMsg(isNetwork ? "❌ Can't reach AI from this app. Send the screenshot to Claude in chat — I'll read it and give you the paste text." : "❌ " + msg.slice(0, 80));
+      // Convert file to dataURL
+      setImportMsg("Preparing image...");
+      const dataUrl = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = e => res(e.target.result);
+        r.onerror = () => rej(new Error("Cannot read file"));
+        r.readAsDataURL(file);
+      });
+      // Run OCR
+      const text = await ocrReadImage(dataUrl);
+      if (!text || !text.trim()) {
+        setImportMsg("❌ OCR found no text in image");
+        setTimeout(() => setImportMsg(""), 6000);
         importingRef.current = false;
         setImporting(false);
         return;
       }
-      if (visionResult && visionResult.length > 0) {
-        const p = visionResultToLegs(visionResult);
-        if (p && p.legs.length > 0) {
-          setParsed(p);
-          setNeedDate(p.needDate);
-          const unknown = {};
-          p.legs.forEach(l => {
-            if (l.origin && !ICAO_TZ[l.origin] && !sessionTz[l.origin]) unknown[l.origin] = 0;
-            if (l.dest && !ICAO_TZ[l.dest] && !sessionTz[l.dest]) unknown[l.dest] = 0;
-          });
-          setUnknownIcaos(Object.keys(unknown).length > 0 ? unknown : {});
-          setImportMsg("✅ " + p.legs.length + " legs imported from image");
-          setTimeout(() => setImportMsg(""), 4000);
-        } else {
-          setImportMsg("❌ AI returned data but conversion failed — try text paste");
-          setTimeout(() => setImportMsg(""), 6000);
-        }
+      setImportMsg("Parsing trip data...");
+      const p = parseDutyTrip(text);
+      if (p && p.legs && p.legs.length > 0) {
+        setParsed(p);
+        setNeedDate(p.needDate);
+        setPasteText(text);
+        const unknown = {};
+        p.legs.forEach(l => {
+          if (l.origin && !ICAO_TZ[l.origin] && !sessionTz[l.origin]) unknown[l.origin] = 0;
+          if (l.dest && !ICAO_TZ[l.dest] && !sessionTz[l.dest]) unknown[l.dest] = 0;
+        });
+        setUnknownIcaos(Object.keys(unknown).length > 0 ? unknown : {});
+        setImportMsg("✅ " + p.legs.length + " legs read from image");
+        setTimeout(() => setImportMsg(""), 4000);
       } else {
-        setImportMsg("❌ AI could not read legs from image — try text paste");
-        setTimeout(() => setImportMsg(""), 6000);
+        // Couldn't auto-parse — put OCR text in textarea for manual review
+        setPasteText(text);
+        setImportMsg("📋 Text extracted — review in field above and hit Parse");
       }
     } catch (err) {
       setImportMsg("❌ " + err.message.slice(0, 60));
@@ -5806,6 +5862,7 @@ function FlightDutyCalc() {
     }
     importingRef.current = false;
     setImporting(false);
+    setOcrBusy(false);
   }
   function handleImageImport(e) {
     const file = e.target.files[0];
@@ -7386,37 +7443,51 @@ function E6B() {
     setHistory(nh);
     store("e6b:hist", nh);
   }
+
+  // Load Tesseract for Calc tab OCR
+  useEffect(() => {
+    loadTesseract(() => {});
+  }, []);
   async function handleImageImport(e) {
     const file = e.target.files[0];
     if (!file) return;
     e.target.value = "";
     setImporting(true);
-    let parsed = null;
     try {
-      setImportMsg("Compressing image...");
-      const res = await imageToTinyJpeg(file, 480);
-      setImportMsg("Sending to AI (" + res.size + "KB)...");
-      parsed = await parseImageViaAPI(res.b64);
-    } catch (e1) {
-      console.log("Vision API failed:", e1.message);
-    }
-    if (parsed && parsed.length > 0) {
-      const newLegs = parsed.map(p => ({
-        ...newLeg(p.from || ""),
-        from: p.from || "",
-        to: p.to || "",
-        distNm: p.distNm ? String(p.distNm) : "",
-        plannedBurnLbs: p.plannedBurnLbs ? String(p.plannedBurnLbs) : "",
-        cruiseAltFt: p.cruiseAltFt ? String(p.cruiseAltFt) : ""
-      }));
-      for (let pi = 1; pi < newLegs.length; pi++) newLegs[pi].from = newLegs[pi - 1].to;
-      setLegs(newLegs);
-      setCalculated(false);
-      setImportMsg("✅ " + parsed.length + " legs imported — add fuel prices");
-      setTimeout(() => setImportMsg(""), 4000);
-    } else {
+      setImportMsg("Reading image...");
+      const text = await ocrFromFile(file, msg => setImportMsg(msg));
+      if (!text || !text.trim()) {
+        setShowPaste(true);
+        setImportMsg("❌ OCR found no text — paste trip text below");
+        setTimeout(() => setImportMsg(""), 6000);
+        setImporting(false);
+        return;
+      }
+      setImportMsg("Parsing legs...");
+      const parsed = parseTripText(text);
+      if (parsed && parsed.length > 0) {
+        const newLegs = parsed.map(p => ({
+          ...newLeg(p.from || ""),
+          from: p.from || "",
+          to: p.to || "",
+          distNm: p.distNm ? String(p.distNm) : "",
+          plannedBurnLbs: p.plannedBurnLbs ? String(p.plannedBurnLbs) : "",
+          cruiseAltFt: p.cruiseAltFt ? String(p.cruiseAltFt) : ""
+        }));
+        for (let pi = 1; pi < newLegs.length; pi++) newLegs[pi].from = newLegs[pi - 1].to;
+        setLegs(newLegs);
+        setCalculated(false);
+        setImportMsg("✅ " + parsed.length + " legs imported — add fuel prices");
+        setTimeout(() => setImportMsg(""), 4000);
+      } else {
+        // Couldn't auto-parse — dump OCR text into paste field
+        setPasteText(text);
+        setShowPaste(true);
+        setImportMsg("📋 Text extracted — review and hit Parse");
+      }
+    } catch (err) {
       setShowPaste(true);
-      setImportMsg("📋 Photo import unavailable — paste trip text below");
+      setImportMsg("❌ " + err.message.slice(0, 50));
       setTimeout(() => setImportMsg(""), 6000);
     }
     setImporting(false);
