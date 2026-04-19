@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.10";
+const APP_VERSION = "1.11";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -791,7 +791,88 @@ function visionResultToLegs(arr) {
     needDate: !legs[0].date
   };
 }
+// ── OCR-aware trip parser (handles Tesseract output from ARINCDirect) ────
+function parseOcrTripText(text) {
+  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+  // Match route lines: ICAO followed by arrow-like chars and another ICAO
+  // OCR produces: -» =» => -> → and variations
+  const routeRe = /^([A-Z]{4})\s*[-=]+[»>→]+\s*([A-Z]{4})/;
+  const legs = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(routeRe);
+    if (!m) continue;
+    const leg = {
+      from: m[1],
+      to: m[2],
+      ete: null,
+      plannedBurnLbs: null,
+      cruiseAltFt: null,
+      distNm: null
+    };
+    // Look ahead for ETE BURN CRUISE FL DIST header line
+    for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+      if (routeRe.test(lines[j])) break;
+      // Check for header line
+      if (/ETE\s+BURN/.test(lines[j])) {
+        // Next line should be the data values
+        const dataLine = lines[j + 1] || "";
+        const parts = dataLine.split(/\s+/).filter(Boolean);
+        if (parts.length >= 5) {
+          // parts: [ETE, BURN, CRUISE, FL, DIST]
+          const eteRaw = parts[0];
+          const burn = Number(parts[1]);
+          const fl = parts[3];
+          const dist = Number(parts[4]);
+          // Parse ETE: could be "7+42", "742", "0+55", "2427"
+          let eteMin = 0;
+          if (eteRaw.includes("+")) {
+            const ep = eteRaw.split("+");
+            eteMin = Number(ep[0]) * 60 + Number(ep[1]);
+          } else {
+            // No +, try to split: last 2 digits = minutes, rest = hours
+            const eteNum = eteRaw.replace(/[^0-9]/g, "");
+            if (eteNum.length >= 3) {
+              const mins = Number(eteNum.slice(-2));
+              const hrs = Number(eteNum.slice(0, -2));
+              if (hrs < 24 && mins < 60) eteMin = hrs * 60 + mins;
+            } else if (eteNum.length === 2) {
+              eteMin = Number(eteNum); // assume minutes
+            } else {
+              eteMin = Number(eteNum) * 60; // assume hours
+            }
+          }
+          leg.ete = eteMin > 0 ? Math.floor(eteMin / 60) + "+" + String(eteMin % 60).padStart(2, "0") : null;
+          if (burn > 0) leg.plannedBurnLbs = burn;
+          if (dist > 0) leg.distNm = dist;
+          // Parse FL: could be "450", "430", "50" (OCR dropped a digit)
+          let flNum = Number(fl);
+          if (flNum > 0) {
+            if (flNum < 100) flNum = flNum * 10; // "50" → 500 → probably 450, but best guess is *10
+            // FL is in hundreds of feet, convert to feet
+            leg.cruiseAltFt = flNum * 100;
+          }
+        } else if (parts.length >= 2) {
+          // Partial parse — try to get at least BURN
+          for (const p of parts) {
+            const n = Number(p);
+            if (n > 1000 && n < 50000 && !leg.plannedBurnLbs) leg.plannedBurnLbs = n;
+          }
+          for (const p of parts) {
+            const n = Number(p);
+            if (n > 100 && n < 5000 && !leg.distNm) leg.distNm = n;
+          }
+        }
+        break;
+      }
+    }
+    legs.push(leg);
+  }
+  return legs.length > 0 ? legs : [];
+}
 function parseTripText(text) {
+  // Try OCR format first, fall back to original
+  const ocrResult = parseOcrTripText(text);
+  if (ocrResult && ocrResult.length > 0) return ocrResult;
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
   const routeRe = /^([A-Z]{4})\s*[\u2192\->]+\s*([A-Z]{4})$/;
   const legs = [];
