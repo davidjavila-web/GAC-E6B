@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.16";
+const APP_VERSION = "1.18";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -438,8 +438,6 @@ function newLeg(from = "") {
     arrPrice: "",
     depRampFee: "",
     depMinPurchase: "",
-    arrRampFee: "",
-    arrMinPurchase: "",
     arrFuelAvail: true,
     payload: "",
     fobOverride: "",
@@ -454,7 +452,7 @@ function getBurn(ac, alt) {
   }
   return Number(ac.customBurnRate || 2000);
 }
-function calcLeg(ac, leg, globalAlt, reserveFuel, fobAtDep) {
+function calcLeg(ac, leg, globalAlt, reserveFuel, fobAtDep, nextLeg) {
   const plannedBurn = Number(leg.plannedBurnLbs || 0);
   const alt = Number(leg.cruiseAltFt || globalAlt || 39000);
   const dist = Number(leg.distNm || 500);
@@ -474,8 +472,10 @@ function calcLeg(ac, leg, globalAlt, reserveFuel, fobAtDep) {
   const depP = Number(leg.depPrice || 0),
     arrP = Number(leg.arrPrice || 0);
   const priceDiff = arrP - depP;
-  const rampFee = Number(leg.arrRampFee || 0);
-  const minPurLbs = Number(leg.arrMinPurchase || 0) * LBS_PER_GAL;
+  // Arrival ramp fee comes from the NEXT leg's departure FBO
+  const arrRampFee = nextLeg ? Number(nextLeg.depRampFee || 0) : 0;
+  const arrMinPurLbs = nextLeg ? Number(nextLeg.depMinPurchase || 0) * LBS_PER_GAL : 0;
+  // This leg's departure ramp fee
   const depRampFee = Number(leg.depRampFee || 0);
   const depMinPurLbs = Number(leg.depMinPurchase || 0) * LBS_PER_GAL;
   const penFactor = Number(ac.burnPenaltyFactor || 0.04);
@@ -497,18 +497,34 @@ function calcLeg(ac, leg, globalAlt, reserveFuel, fobAtDep) {
     note = "Enter fuel prices at both airports";
   } else {
     const netPerLb = priceDiff - breakEven;
-    if (netPerLb > 0 || rampFee > 0 || depRampFee > 0) {
+    if (netPerLb > 0 || arrRampFee > 0 || depRampFee > 0) {
       let bestSavings = -Infinity,
         bestLbs = 0;
       for (let tl = 0; tl <= maxExtra; tl += 200) {
         const pen = tl * penFactor * hrs;
-        const destFuel = Math.max(0, tripFuel - tl);
-        const rampSaved = rampFee > 0 && destFuel < minPurLbs ? rampFee : 0;
+        // Arrival ramp fee: if tankering means we buy less at destination than the waiver threshold
+        const arrivalFob = Math.max(0, fob + tl - baseBurn);
+        const fuelNeededAtDest = arrRampFee > 0 && nextLeg ? Math.max(0, Number(nextLeg.plannedBurnLbs || 0) + Number(reserveFuel || 3000) - arrivalFob) : 0;
+        const arrFeeWaived = arrRampFee > 0 && arrMinPurLbs > 0 && fuelNeededAtDest >= arrMinPurLbs;
+        const arrFeeCost = arrRampFee > 0 && !arrFeeWaived ? arrRampFee : 0;
+        const arrFeeBaseline = (() => {
+          const baseArrFob = Math.max(0, fob - baseBurn);
+          const baseFuelNeeded = arrRampFee > 0 && nextLeg ? Math.max(0, Number(nextLeg.plannedBurnLbs || 0) + Number(reserveFuel || 3000) - baseArrFob) : 0;
+          const baseWaived = arrRampFee > 0 && arrMinPurLbs > 0 && baseFuelNeeded >= arrMinPurLbs;
+          return arrRampFee > 0 && !baseWaived ? arrRampFee : 0;
+        })();
+        const arrFeeSaved = arrFeeBaseline - arrFeeCost;
         // Departure ramp fee: waived if total fuel purchased at dep >= threshold
         const fuelBoughtAtDep = Math.max(0, tripFuel - fob) + tl;
-        const depRampSaved = depRampFee > 0 && fuelBoughtAtDep >= depMinPurLbs && depMinPurLbs > 0 ? depRampFee : 0;
-        const depRampCost = depRampFee > 0 && (depMinPurLbs <= 0 || fuelBoughtAtDep >= depMinPurLbs) ? 0 : depRampFee;
-        const s = tl * priceDiff - pen * depP + rampSaved + depRampSaved - depRampCost;
+        const depRampWaived = depRampFee > 0 && depMinPurLbs > 0 && fuelBoughtAtDep >= depMinPurLbs;
+        const depRampCost = depRampFee > 0 && !depRampWaived ? depRampFee : 0;
+        const depRampBaseline = (() => {
+          const baseFuel = Math.max(0, tripFuel - fob);
+          const baseWaived = depRampFee > 0 && depMinPurLbs > 0 && baseFuel >= depMinPurLbs;
+          return depRampFee > 0 && !baseWaived ? depRampFee : 0;
+        })();
+        const depRampSaved = depRampBaseline - depRampCost;
+        const s = tl * priceDiff - pen * depP + arrFeeSaved + depRampSaved;
         if (s > bestSavings) {
           bestSavings = s;
           bestLbs = tl;
@@ -549,7 +565,7 @@ function calcLeg(ac, leg, globalAlt, reserveFuel, fobAtDep) {
     hrs,
     baseBurn,
     tripFuel,
-    rampFee,
+    arrRampFee,
     depRampFee,
     depRampWaived,
     depRampOwed,
@@ -1293,7 +1309,7 @@ function DecisionBadge({
   const icon = isTanker ? "✅" : isNoFuel ? "❌" : isTripFuelOnly ? "⛽" : "❌";
   const [showExp, setShowExp] = React.useState(false);
   let action = "";
-  if (isTanker) action = "LOAD " + fL(r.tankerLbs) + " (" + fG(r.tankerLbs) + ") at " + (from || "departure");else if (isNoPurchase) action = "NO FUEL at " + (from || "departure") + " — current FOB covers this leg";else if (r.fobCoversTrip) action = "NO FUEL at " + (from || "departure") + " — depart with current FOB";else if (r.rampFee > 0) action = "TRIP FUEL ONLY at " + (from || "departure") + " — cheaper to refuel at " + (to || "destination") + " (ramp " + sym + Number(r.rampFee || 0).toFixed(0) + ")";else action = "TRIP FUEL ONLY at " + (from || "departure") + " — cheaper to refuel at " + (to || "destination");
+  if (isTanker) action = "LOAD " + fL(r.tankerLbs) + " (" + fG(r.tankerLbs) + ") at " + (from || "departure");else if (isNoPurchase) action = "NO FUEL at " + (from || "departure") + " — current FOB covers this leg";else if (r.fobCoversTrip) action = "NO FUEL at " + (from || "departure") + " — depart with current FOB";else if (r.arrRampFee > 0) action = "TRIP FUEL ONLY at " + (from || "departure") + " — cheaper to refuel at " + (to || "destination");else action = "TRIP FUEL ONLY at " + (from || "departure") + " — cheaper to refuel at " + (to || "destination");
 
   // Build plain-English explanation
   function buildExplanation() {
@@ -1332,9 +1348,6 @@ function DecisionBadge({
       if (diff > be) {
         lines.push("The price advantage (" + sym + diff.toFixed(3) + "/lb) exceeds the carry penalty (" + sym + be.toFixed(3) + "/lb), so tankering saves money.");
       }
-      if (r.rampFee > 0) {
-        lines.push("Loading " + fL(r.tankerLbs) + " at " + (from || "departure") + " avoids the " + sym + r.rampFee + " ramp fee at " + (to || "destination") + ".");
-      }
       if (r.depRampFee > 0) {
         lines.push(r.depRampWaived ? "The " + sym + r.depRampFee + " departure ramp fee at " + (from || "departure") + " is waived by the fuel purchase." : "A departure ramp fee of " + sym + r.depRampFee + " applies at " + (from || "departure") + ".");
       }
@@ -1347,9 +1360,6 @@ function DecisionBadge({
         lines.push("Fuel at " + (to || "destination") + " (" + sym + arrP.toFixed(3) + "/lb) is cheaper than " + (from || "departure") + " (" + sym + depP.toFixed(3) + "/lb). Load trip fuel only — no extra.");
       } else if (diff > 0 && diff <= be) {
         lines.push("Although fuel is cheaper here by " + sym + diff.toFixed(3) + "/lb, the burn penalty of " + sym + be.toFixed(3) + "/lb over " + hrs.toFixed(1) + " hrs wipes out the savings. Carrying extra fuel would cost more than it saves.");
-      }
-      if (r.rampFee > 0) {
-        lines.push("A ramp fee of " + sym + r.rampFee + " applies at " + (to || "destination") + ". Even with this fee, it's still cheaper to refuel at " + (to || "destination") + " than to carry extra from " + (from || "departure") + ".");
       }
       if (r.depRampFee > 0 && r.depRampOwed) {
         lines.push("A departure ramp fee of " + sym + r.depRampFee + " applies at " + (from || "departure") + ".");
@@ -1476,30 +1486,7 @@ function DecisionBadge({
         color: C.green
       }
     }, "+", fM(r.savings, sym))));
-  })(), !isTanker && !isNoFuel && r.rampFee > 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: C.gold + "15",
-      border: "1px solid " + C.gold + "33",
-      borderRadius: 8,
-      padding: "8px 12px",
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      marginTop: 4,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 12,
-      color: C.sub
-    }
-  }, "Ramp fee at ", to), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 15,
-      fontWeight: 800,
-      color: C.gold
-    }
-  }, sym, Number(r.rampFee || 0).toFixed(0))), r.depRampFee > 0 && /*#__PURE__*/React.createElement("div", {
+  })(), r.depRampFee > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       background: (r.depRampWaived ? C.green : C.gold) + "15",
       border: "1px solid " + (r.depRampWaived ? C.green : C.gold) + "33",
@@ -1636,14 +1623,14 @@ function LegCard({
       id: "dp" + legNum,
       val: l.depPrice
     }, {
-      id: "rf" + legNum,
-      val: l.arrRampFee
-    }, {
-      id: "wv" + legNum,
-      val: l.arrMinPurchase
-    }, {
       id: "ap" + legNum,
       val: l.arrPrice
+    }, {
+      id: "drf" + legNum,
+      val: l.depRampFee
+    }, {
+      id: "dwv" + legNum,
+      val: l.depMinPurchase
     }, {
       id: "py" + legNum,
       val: l.payload
@@ -1879,7 +1866,7 @@ function LegCard({
       background: lcBorder,
       marginBottom: 14
     }
-  }), legNum === 1 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
       fontWeight: 700,
@@ -1925,49 +1912,7 @@ function LegCard({
       background: lcBorder,
       marginBottom: 14
     }
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontWeight: 700,
-      color: lc,
-      textTransform: "uppercase",
-      letterSpacing: .8,
-      marginBottom: 10
-    }
-  }, leg.to || "Arrival", " FBO"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 10,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement(Field, {
-    label: "Ramp Fee (" + sym + ")",
-    value: leg.arrRampFee,
-    onChange: v => onChange({
-      ...leg,
-      arrRampFee: v
-    }),
-    step: "50",
-    color: lc,
-    fieldId: "rf" + legNum,
-    onNext: after(4),
-    legNum: legNum,
-    legContext: (leg.from || "—") + " → " + (leg.to || "—")
-  }), /*#__PURE__*/React.createElement(Field, {
-    label: "Waived if >= (gal)",
-    value: leg.arrMinPurchase,
-    onChange: v => onChange({
-      ...leg,
-      arrMinPurchase: v
-    }),
-    step: "100",
-    color: lc,
-    fieldId: "wv" + legNum,
-    onNext: after(5),
-    legNum: legNum,
-    legContext: (leg.from || "—") + " → " + (leg.to || "—")
-  })), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -2348,7 +2293,7 @@ function BriefModal({
     const isTanker = r.decision === "TANKER" || r.decision === "MUST TANKER";
     const lc = LEG_COLORS[i % LEG_COLORS.length];
     let action = "";
-    if (isTanker) action = "LOAD " + fL(r.tankerLbs) + " (" + fG(r.tankerLbs) + ") at " + leg.from;else if (r.decision === "NO PURCHASE") action = "NO FUEL at " + leg.from + " — current FOB covers this leg";else if (r.fobCoversTrip) action = "NO FUEL at " + leg.from + " — depart with current FOB";else if (r.rampFee > 0) action = "TRIP FUEL ONLY at " + leg.from + " — cheaper to refuel at " + leg.to + " (ramp " + sym + Number(r.rampFee).toFixed(0) + ")";else action = "TRIP FUEL ONLY at " + leg.from + " — cheaper to refuel at " + leg.to;
+    if (isTanker) action = "LOAD " + fL(r.tankerLbs) + " (" + fG(r.tankerLbs) + ") at " + leg.from;else if (r.decision === "NO PURCHASE") action = "NO FUEL at " + leg.from + " — current FOB covers this leg";else if (r.fobCoversTrip) action = "NO FUEL at " + leg.from + " — depart with current FOB";else if (r.arrRampFee > 0) action = "TRIP FUEL ONLY at " + leg.from + " — cheaper to refuel at " + leg.to;else action = "TRIP FUEL ONLY at " + leg.from + " — cheaper to refuel at " + leg.to;
     const isNoFuelB = r.decision === "NO PURCHASE" || r.fobCoversTrip;
     const icon = isTanker ? "✅" : isNoFuelB ? "❌" : "⛽";
     const bg = isTanker ? C.green : isNoFuelB ? C.red : C.gold;
@@ -2421,10 +2366,6 @@ function BriefModal({
         v: sym + (r.tankerLbs * arrP).toFixed(2) + " at " + leg.to
       });
     }
-    if (r.rampFee > 0) mathRows.push({
-      l: "Ramp fee at " + leg.to,
-      v: sym + Number(r.rampFee).toFixed(0) + (r.tankerLbs > 0 ? " (avoided by tankering)" : " (payable on arrival)")
-    });
     if (r.depRampFee > 0) mathRows.push({
       l: "Dep ramp fee at " + leg.from,
       v: sym + Number(r.depRampFee).toFixed(0) + (r.depRampWaived ? " (waived by fuel purchase)" : " (payable)")
@@ -2450,8 +2391,8 @@ function BriefModal({
       if (diff > 0) {
         narrative.push("Fuel is " + sym + diff.toFixed(3) + "/lb cheaper at " + leg.from + " than " + leg.to + ". After accounting for the burn penalty of " + sym + (pen * depP).toFixed(3) + "/lb per hour over " + hrs.toFixed(2) + " hours (break-even: " + sym + be.toFixed(3) + "/lb), the price advantage of " + sym + diff.toFixed(3) + "/lb still exceeds the cost of carrying the fuel.");
       }
-      if (r.rampFee > 0) {
-        narrative.push("Additionally, loading " + fL(r.tankerLbs) + " at " + leg.from + " eliminates the " + sym + Number(r.rampFee).toFixed(0) + " ramp fee at " + leg.to + ", which would otherwise be charged for a fuel-only stop.");
+      if (r.depRampFee > 0 && r.depRampWaived) {
+        narrative.push("The " + sym + Number(r.depRampFee).toFixed(0) + " departure ramp fee at " + leg.from + " is waived by the fuel purchase.");
       }
       narrative.push("Net result: loading " + fL(r.tankerLbs) + " at " + leg.from + " saves " + sym + r.savings.toFixed(2) + " compared to buying at " + leg.to + ".");
     } else {
@@ -2463,10 +2404,8 @@ function BriefModal({
       } else if (diff > 0 && diff <= be) {
         narrative.push("Although fuel is " + sym + diff.toFixed(3) + "/lb cheaper at " + leg.from + ", the burn penalty of " + sym + (pen * depP).toFixed(3) + "/lb per hour over " + hrs.toFixed(2) + " hours requires a price difference of at least " + sym + be.toFixed(3) + "/lb to break even. Carrying extra fuel would cost more than it saves.");
       }
-      if (r.rampFee > 0 && !isTanker) {
-        const rampCost = Number(r.rampFee);
-        const tankerCost = r.maxExtra > 0 ? r.maxExtra * Math.abs(diff) - r.maxExtra * pen * hrs * depP : 0;
-        narrative.push("A ramp fee of " + sym + rampCost.toFixed(0) + " applies at " + leg.to + ". Even with this fee, it's still cheaper to refuel at " + leg.to + " than to carry extra from " + leg.from + ".");
+      if (r.depRampFee > 0 && r.depRampOwed) {
+        narrative.push("A departure ramp fee of " + sym + Number(r.depRampFee).toFixed(0) + " applies at " + leg.from + ".");
       }
       if (r.fobCoversTrip) {
         narrative.push("Depart " + leg.from + " with current fuel. No purchase needed.");
@@ -7624,7 +7563,7 @@ function E6B() {
     for (let i = 0; i < legs.length; i++) {
       const leg = legs[i];
       const fobForLeg = i === 0 ? Number(initialFob || 0) : leg.useOverride ? Number(leg.fobOverride || 0) : chainedFob;
-      const r = calcLeg(currentAc, leg, globalAlt, reserveFuel, fobForLeg);
+      const r = calcLeg(currentAc, leg, globalAlt, reserveFuel, fobForLeg, legs[i + 1] || null);
       res.push(r);
       chainedFob = r.arrivalFob;
     }
@@ -7677,7 +7616,7 @@ function E6B() {
     for (let i = 0; i < legs.length; i++) {
       const leg = legs[i];
       const fobForLeg = i === 0 ? Number(initialFob || 0) : leg.useOverride ? Number(leg.fobOverride || 0) : chainedFob;
-      const r = calcLeg(currentAc, leg, globalAlt, reserveFuel, fobForLeg);
+      const r = calcLeg(currentAc, leg, globalAlt, reserveFuel, fobForLeg, legs[i + 1] || null);
       res.push(r);
       chainedFob = r.arrivalFob;
     }
