@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.18";
+const APP_VERSION = "1.19";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -5845,6 +5845,14 @@ function computeDutyAnalysis(periods, crewMode, dutyOnDefMin, dutyOffDefMin, cus
 function FlightDutyCalc() {
   const wide = useWide();
   const [crewMode, setCrewMode] = useState(2);
+  const [dutyInputMode, setDutyInputMode] = useState("import"); // "import" or "manual"
+  const [manualLegs, setManualLegs] = useState([{
+    origin: "",
+    dest: "",
+    depTime: "",
+    arrTime: "",
+    date: ""
+  }]);
   const [pasteText, setPasteText] = useState("");
   const [parseError, setParseError] = useState("");
   const [parsed, setParsed] = useState(null);
@@ -6147,6 +6155,83 @@ function FlightDutyCalc() {
     });
     setUnknownIcaos(Object.keys(unknown).length > 0 ? unknown : {});
   }
+  function addManualLeg() {
+    setManualLegs(ls => [...ls, {
+      origin: ls[ls.length - 1]?.dest || "",
+      dest: "",
+      depTime: "",
+      arrTime: "",
+      date: ls[ls.length - 1]?.date || ""
+    }]);
+  }
+  function removeManualLeg(i) {
+    setManualLegs(ls => ls.length <= 1 ? ls : ls.filter((_, j) => j !== i));
+  }
+  function updateManualLeg(i, field, val) {
+    setManualLegs(ls => ls.map((l, j) => j === i ? {
+      ...l,
+      [field]: val
+    } : l));
+  }
+  function parseManualLegs() {
+    const legs = [];
+    for (let i = 0; i < manualLegs.length; i++) {
+      const ml = manualLegs[i];
+      if (!ml.origin || !ml.dest || !ml.depTime || !ml.arrTime) {
+        setParseError("Fill in all fields for leg " + (i + 1));
+        return;
+      }
+      const depParts = ml.depTime.split(":"),
+        arrParts = ml.arrTime.split(":");
+      if (depParts.length < 2 || arrParts.length < 2) {
+        setParseError("Use HH:MM format for times on leg " + (i + 1));
+        return;
+      }
+      const depH = Number(depParts[0]),
+        depM = Number(depParts[1]);
+      const arrH = Number(arrParts[0]),
+        arrM = Number(arrParts[1]);
+      let flightMins = arrH * 60 + arrM - (depH * 60 + depM);
+      if (flightMins < 0) flightMins += 1440;
+      let date = null;
+      if (ml.date) {
+        const dp = ml.date.split("-");
+        if (dp.length === 3) {
+          const monthNames = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+          date = {
+            day: Number(dp[2]),
+            month: monthNames[Number(dp[1])],
+            year2: Number(dp[0].slice(-2))
+          };
+        }
+      }
+      legs.push({
+        origin: ml.origin.toUpperCase(),
+        dest: ml.dest.toUpperCase(),
+        depH,
+        depM,
+        arrH,
+        arrM,
+        flightMins,
+        hasRest: false,
+        restMins: null,
+        date
+      });
+    }
+    if (legs.length === 0) return;
+    setParseError("");
+    const unknown = {};
+    legs.forEach(l => {
+      if (l.origin && !ICAO_TZ[l.origin] && !sessionTz[l.origin]) unknown[l.origin] = 0;
+      if (l.dest && !ICAO_TZ[l.dest] && !sessionTz[l.dest]) unknown[l.dest] = 0;
+    });
+    setUnknownIcaos(Object.keys(unknown).length > 0 ? unknown : {});
+    setParsed({
+      legs,
+      needDate: !legs[0].date
+    });
+    setNeedDate(!legs[0].date);
+  }
   function runCalc() {
     if (!parsed) return;
     let legs = [...parsed.legs];
@@ -6301,6 +6386,261 @@ function FlightDutyCalc() {
     },
     onChange: handlePdfImport
   }), !result && !parsed && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 0,
+      background: C.bg,
+      borderRadius: 10,
+      padding: 3,
+      border: "1px solid " + C.border,
+      marginBottom: 14
+    }
+  }, [{
+    m: "import",
+    l: "📋 Import"
+  }, {
+    m: "manual",
+    l: "✏️ Manual"
+  }].map(({
+    m,
+    l
+  }) => /*#__PURE__*/React.createElement("button", {
+    key: m,
+    onClick: () => {
+      setDutyInputMode(m);
+      setParseError("");
+    },
+    style: {
+      flex: 1,
+      padding: "10px 8px",
+      borderRadius: 8,
+      border: "none",
+      background: dutyInputMode === m ? C.accent : "transparent",
+      color: dutyInputMode === m ? "#fff" : C.muted,
+      fontSize: 13,
+      fontWeight: 700,
+      cursor: "pointer"
+    }
+  }, l))), !result && !parsed && dutyInputMode === "manual" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.card,
+      border: "1.5px solid " + C.accent + "55",
+      borderRadius: 12,
+      padding: 16,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      color: C.text,
+      marginBottom: 12
+    }
+  }, "\u270F\uFE0F Enter Legs"), manualLegs.map((ml, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: C.bg,
+      borderRadius: 10,
+      padding: 12,
+      marginBottom: 10,
+      border: "1px solid " + C.border
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.accent,
+      color: "#fff",
+      borderRadius: 6,
+      padding: "3px 10px",
+      fontSize: 11,
+      fontWeight: 700
+    }
+  }, "LEG ", i + 1), manualLegs.length > 1 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => removeManualLeg(i),
+    style: {
+      background: "transparent",
+      border: "none",
+      color: C.red,
+      fontSize: 16,
+      cursor: "pointer",
+      padding: "2px 6px"
+    }
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 8,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: C.muted,
+      textTransform: "uppercase",
+      letterSpacing: .5,
+      marginBottom: 4
+    }
+  }, "Origin"), /*#__PURE__*/React.createElement("input", {
+    value: ml.origin,
+    onChange: e => updateManualLeg(i, "origin", e.target.value.toUpperCase().slice(0, 4)),
+    placeholder: "ICAO",
+    maxLength: 4,
+    style: {
+      width: "100%",
+      background: C.card,
+      border: "1.5px solid " + C.border,
+      borderRadius: 8,
+      padding: "9px 10px",
+      color: C.text,
+      fontSize: 15,
+      fontWeight: 700,
+      textTransform: "uppercase",
+      letterSpacing: 1,
+      boxSizing: "border-box"
+    }
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: C.muted,
+      textTransform: "uppercase",
+      letterSpacing: .5,
+      marginBottom: 4
+    }
+  }, "Destination"), /*#__PURE__*/React.createElement("input", {
+    value: ml.dest,
+    onChange: e => updateManualLeg(i, "dest", e.target.value.toUpperCase().slice(0, 4)),
+    placeholder: "ICAO",
+    maxLength: 4,
+    style: {
+      width: "100%",
+      background: C.card,
+      border: "1.5px solid " + C.border,
+      borderRadius: 8,
+      padding: "9px 10px",
+      color: C.text,
+      fontSize: 15,
+      fontWeight: 700,
+      textTransform: "uppercase",
+      letterSpacing: 1,
+      boxSizing: "border-box"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: C.muted,
+      textTransform: "uppercase",
+      letterSpacing: .5,
+      marginBottom: 4
+    }
+  }, "Dep (UTC)"), /*#__PURE__*/React.createElement("input", {
+    type: "time",
+    value: ml.depTime,
+    onChange: e => updateManualLeg(i, "depTime", e.target.value),
+    style: {
+      width: "100%",
+      background: C.card,
+      border: "1.5px solid " + C.border,
+      borderRadius: 8,
+      padding: "9px 8px",
+      color: C.text,
+      fontSize: 14,
+      fontWeight: 700,
+      boxSizing: "border-box"
+    }
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: C.muted,
+      textTransform: "uppercase",
+      letterSpacing: .5,
+      marginBottom: 4
+    }
+  }, "Arr (UTC)"), /*#__PURE__*/React.createElement("input", {
+    type: "time",
+    value: ml.arrTime,
+    onChange: e => updateManualLeg(i, "arrTime", e.target.value),
+    style: {
+      width: "100%",
+      background: C.card,
+      border: "1.5px solid " + C.border,
+      borderRadius: 8,
+      padding: "9px 8px",
+      color: C.text,
+      fontSize: 14,
+      fontWeight: 700,
+      boxSizing: "border-box"
+    }
+  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10,
+      color: C.muted,
+      textTransform: "uppercase",
+      letterSpacing: .5,
+      marginBottom: 4
+    }
+  }, "Date"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: ml.date,
+    onChange: e => updateManualLeg(i, "date", e.target.value),
+    style: {
+      width: "100%",
+      background: C.card,
+      border: "1.5px solid " + C.border,
+      borderRadius: 8,
+      padding: "9px 6px",
+      color: C.text,
+      fontSize: 13,
+      fontWeight: 700,
+      boxSizing: "border-box"
+    }
+  }))))), /*#__PURE__*/React.createElement("button", {
+    onClick: addManualLeg,
+    style: {
+      width: "100%",
+      padding: 10,
+      borderRadius: 8,
+      border: "1.5px dashed " + C.accent + "66",
+      background: "transparent",
+      color: C.accent,
+      fontSize: 13,
+      fontWeight: 700,
+      cursor: "pointer",
+      marginBottom: 12
+    }
+  }, "+ Add Leg"), parseError && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.red,
+      fontWeight: 600,
+      marginTop: 4,
+      marginBottom: 8
+    }
+  }, parseError), /*#__PURE__*/React.createElement("button", {
+    onClick: parseManualLegs,
+    style: {
+      width: "100%",
+      padding: 14,
+      borderRadius: 12,
+      background: "linear-gradient(135deg," + C.accent + ",#2a5f85)",
+      border: "none",
+      color: "#fff",
+      fontSize: 15,
+      fontWeight: 800,
+      cursor: "pointer"
+    }
+  }, "Calculate Duty Times")), !result && !parsed && dutyInputMode === "import" && /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.card,
       border: "1.5px solid " + C.accent + "55",
