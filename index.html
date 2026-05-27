@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.20";
+const APP_VERSION = "1.21";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -5666,6 +5666,13 @@ function parseDutyTrip(text) {
   };
 }
 function groupDutyPeriods(legs) {
+  // Auto-detect rest: if gap between arrival and next departure > 4 hrs, treat as rest
+  for (let i = 0; i < legs.length - 1; i++) {
+    if (legs[i].arrEpoch && legs[i + 1].depEpoch) {
+      const gapHrs = (legs[i + 1].depEpoch - legs[i].arrEpoch) / 3600000;
+      if (gapHrs >= 4) legs[i].hasRest = true;
+    }
+  }
   const periods = [];
   let cur = [];
   for (let i = 0; i < legs.length; i++) {
