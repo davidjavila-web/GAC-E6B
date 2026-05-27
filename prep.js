@@ -21,6 +21,15 @@ if (code === before) {
   console.warn("prep.js: no react import found to strip — continuing.");
 }
 
+// Strip `export default ` from the root component declaration. The HTML shell
+// is a plain <script> (not type="module"), so the `export` keyword would throw
+// SyntaxError: Unexpected token 'export' at parse time.
+const beforeExport = code;
+code = code.replace(/^\s*export\s+default\s+/gm, "");
+if (code === beforeExport) {
+  console.warn("prep.js: no `export default` found to strip — continuing.");
+}
+
 // Make sure the file ends with a newline before we append the render call.
 if (!code.endsWith("\n")) code += "\n";
 
