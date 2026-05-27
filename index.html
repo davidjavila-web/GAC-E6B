@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.19";
+const APP_VERSION = "1.20";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -6282,6 +6282,32 @@ function FlightDutyCalc() {
     setImportMsg("");
     setPastedImg(null);
   }
+  function editLegs() {
+    if (!parsed) return;
+    const monthNames = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+    const mLegs = parsed.legs.map(l => {
+      const depT = String(l.depH).padStart(2, "0") + ":" + String(l.depM).padStart(2, "0");
+      const arrT = String(l.arrH).padStart(2, "0") + ":" + String(l.arrM).padStart(2, "0");
+      let dateStr = "";
+      if (l.date) {
+        const mi = monthNames.indexOf(l.date.month);
+        if (mi > 0) dateStr = "20" + String(l.date.year2).padStart(2, "0") + "-" + String(mi).padStart(2, "0") + "-" + String(l.date.day).padStart(2, "0");
+      }
+      return {
+        origin: l.origin || "",
+        dest: l.dest || "",
+        depTime: depT,
+        arrTime: arrT,
+        date: dateStr
+      };
+    });
+    setManualLegs(mLegs);
+    setDutyInputMode("manual");
+    setParsed(null);
+    setResult(null);
+    setParseError("");
+    setShowExplain(false);
+  }
   function buildExplainLines() {
     if (!result) return [];
     const lines = [],
@@ -6545,9 +6571,15 @@ function FlightDutyCalc() {
       marginBottom: 4
     }
   }, "Dep (UTC)"), /*#__PURE__*/React.createElement("input", {
-    type: "time",
     value: ml.depTime,
-    onChange: e => updateManualLeg(i, "depTime", e.target.value),
+    onChange: e => {
+      let v = e.target.value.replace(/[^0-9:]/g, "");
+      if (v.length === 4 && !v.includes(":")) v = v.slice(0, 2) + ":" + v.slice(2);
+      updateManualLeg(i, "depTime", v.slice(0, 5));
+    },
+    placeholder: "HH:MM",
+    maxLength: 5,
+    inputMode: "numeric",
     style: {
       width: "100%",
       background: C.card,
@@ -6555,8 +6587,10 @@ function FlightDutyCalc() {
       borderRadius: 8,
       padding: "9px 8px",
       color: C.text,
-      fontSize: 14,
+      fontSize: 15,
       fontWeight: 700,
+      textAlign: "center",
+      letterSpacing: 1,
       boxSizing: "border-box"
     }
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
@@ -6568,9 +6602,15 @@ function FlightDutyCalc() {
       marginBottom: 4
     }
   }, "Arr (UTC)"), /*#__PURE__*/React.createElement("input", {
-    type: "time",
     value: ml.arrTime,
-    onChange: e => updateManualLeg(i, "arrTime", e.target.value),
+    onChange: e => {
+      let v = e.target.value.replace(/[^0-9:]/g, "");
+      if (v.length === 4 && !v.includes(":")) v = v.slice(0, 2) + ":" + v.slice(2);
+      updateManualLeg(i, "arrTime", v.slice(0, 5));
+    },
+    placeholder: "HH:MM",
+    maxLength: 5,
+    inputMode: "numeric",
     style: {
       width: "100%",
       background: C.card,
@@ -6578,8 +6618,10 @@ function FlightDutyCalc() {
       borderRadius: 8,
       padding: "9px 8px",
       color: C.text,
-      fontSize: 14,
+      fontSize: 15,
       fontWeight: 700,
+      textAlign: "center",
+      letterSpacing: 1,
       boxSizing: "border-box"
     }
   })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
@@ -7094,6 +7136,19 @@ function FlightDutyCalc() {
       cursor: "pointer"
     }
   }, "Re-paste"), /*#__PURE__*/React.createElement("button", {
+    onClick: editLegs,
+    style: {
+      flex: 1,
+      padding: 14,
+      borderRadius: 12,
+      background: C.card,
+      border: "1.5px solid " + C.accent + "44",
+      color: C.accent,
+      fontSize: 14,
+      fontWeight: 700,
+      cursor: "pointer"
+    }
+  }, "\u270F\uFE0F Edit"), /*#__PURE__*/React.createElement("button", {
     onClick: runCalc,
     style: {
       flex: 2,
@@ -7836,11 +7891,29 @@ function FlightDutyCalc() {
         lineHeight: 1.5
       }
     }, "FAR 135.267/269 \xB7 ", limits.label, " \xB7 For planning purposes only"));
-  })(), /*#__PURE__*/React.createElement("button", {
+  })(), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: editLegs,
+    style: {
+      flex: 1,
+      padding: 14,
+      borderRadius: 12,
+      background: C.accent,
+      border: "none",
+      color: "#fff",
+      fontSize: 14,
+      fontWeight: 700,
+      cursor: "pointer"
+    }
+  }, "\u270F\uFE0F Edit Legs"), /*#__PURE__*/React.createElement("button", {
     onClick: resetAll,
     style: {
-      width: "100%",
-      marginTop: 12,
+      flex: 1,
       padding: 14,
       borderRadius: 12,
       background: C.card,
@@ -7850,7 +7923,7 @@ function FlightDutyCalc() {
       fontWeight: 700,
       cursor: "pointer"
     }
-  }, "\u2190 New Calculation")));
+  }, "\u2190 New Calculation"))));
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────
