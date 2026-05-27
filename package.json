@@ -1,0 +1,17 @@
+{
+  "name": "gac-e6b",
+  "version": "1.21.0",
+  "private": true,
+  "description": "E6B Aviation Tools PWA — single-file React build",
+  "scripts": {
+    "prep": "node prep.js",
+    "transpile": "babel e6b_for_build.jsx --presets=@babel/preset-react --out-file e6b_built.js",
+    "wrap": "node build_html.js",
+    "build": "npm run prep && npm run transpile && npm run wrap"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.29.7",
+    "@babel/core": "^7.29.7",
+    "@babel/preset-react": "^7.29.7"
+  }
+}

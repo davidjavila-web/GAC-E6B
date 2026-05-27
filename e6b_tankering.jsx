@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.21";
+const APP_VERSION="1.22";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2744,28 +2744,6 @@ function FlightDutyCalc(){
     setShowExplain(false);
   }
 
-  function buildExplainLines(){
-    if(!result)return[];
-    const lines=[],lim=result.limits;
-    lines.push({type:"context",icon:"👥",text:`Operating with ${lim.label} crew under ${lim.reg} (unscheduled). Duty max: ${lim.duty} hrs, flight max: ${lim.flight} hrs per duty period and rolling 24 hrs, required rest: ${lim.rest} hrs.`});
-    result.dutyResults.forEach((dp,i)=>{
-      const dutyOk=dp.dutyHrs<=lim.duty,flightOk=dp.flightHrs<=lim.flight;
-      lines.push({type:"info",icon:"📋",text:`Duty Period ${i+1}: ${fmtEpochT(dp.dutyStart)} → ${fmtEpochT(dp.dutyEnd)} (${fmtHrs2(dp.dutyHrs)} duty, ${fmtHrs2(dp.flightHrs)} flight across ${dp.legs.length} leg${dp.legs.length>1?"s":""}).`});
-      lines.push({type:dutyOk?"pass":"fail",icon:dutyOk?"✅":"❌",text:`Duty time ${fmtHrs2(dp.dutyHrs)} ${dutyOk?"within":"exceeds"} ${lim.duty} hr limit.`});
-      lines.push({type:flightOk?"pass":"fail",icon:flightOk?"✅":"❌",text:`Flight time ${fmtHrs2(dp.flightHrs)} ${flightOk?"within":"exceeds"} ${lim.flight} hr limit.`});
-      if(dp.restBefore!==undefined){const restOk=dp.restBefore>=lim.rest;lines.push({type:restOk?"pass":"fail",icon:restOk?"✅":"❌",text:`Rest before this period: ${fmtHrs2(dp.restBefore)} (min ${lim.rest} hrs). ${restOk?"Adequate.":"Insufficient."}`});}
-    });
-    const r24v=result.violations.filter(v=>v.type==="rolling24");
-    if(r24v.length>0){
-      lines.push({type:"fail",icon:"🔴",text:`Rolling 24-hour flight time limit violated ${r24v.length} time${r24v.length>1?"s":""}:`});
-      r24v.forEach(v=>{const c=v.contributors.map(x=>`${x.origin}→${x.dest} (${x.hrs.toFixed(1)}h)`).join(" + ");lines.push({type:"fail",icon:"⚠️",text:`At ${fmtEpochT(v.time)}: ${v.total.toFixed(1)} hrs in past 24 hrs (max ${lim.rolling24}). Contributing: ${c}.`});});
-    }else{lines.push({type:"pass",icon:"✅",text:`Rolling 24-hour flight time check: no violations within the ${lim.rolling24} hr rolling limit.`});}
-    lines.push({type:"info",icon:"🛏️",text:`Required rest after final duty period: ${lim.rest} hrs before next duty may begin.`});
-    if(result.violations.length===0)lines.push({type:"verdict-pass",icon:"🟢",text:`GO — All duty time, flight time, rest, and rolling 24-hour limits are satisfied for ${lim.label} operations.`});
-    else{const types=[...new Set(result.violations.map(v=>v.type))];const reasons=types.map(t=>t==="duty"?"duty time exceeded":t==="flight"?"flight time exceeded":t==="rest"?"insufficient rest":"rolling 24-hr limit exceeded");lines.push({type:"verdict-fail",icon:"🔴",text:`NO GO — ${result.violations.length} violation${result.violations.length>1?"s":""}: ${reasons.join(", ")}. This trip does not comply with ${lim.reg}.`});}
-    return lines;
-  }
-
   return(<>
     <input ref={imgRef} type="file" accept="image/png,image/jpeg,image/jpg,image/heic,image/heif,image/webp,image/*" style={{display:"none"}} onChange={handleImageImport}/>
     <input ref={camRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handleImageImport}/>
@@ -3064,19 +3042,134 @@ function FlightDutyCalc(){
       </button>
 
       {showExplain&&(()=>{
-        const lines=buildExplainLines();
+        const lim=result.limits;
+        const pad=n=>String(n).padStart(2,"0");
+        const utcStr=(h,m)=>`${pad(h)}:${pad(m)}`;
+        const localStr=(h,m,icao)=>{
+          const tz=ICAO_TZ[icao];const sTz=sessionTz[icao];
+          const offset=tz!==undefined?tz:(sTz!==undefined&&sTz!==""&&!isNaN(sTz)?Number(sTz):null);
+          if(offset===null)return null;
+          const total=((h*60+m)+offset*60+1440*7)%1440;
+          return`${pad(Math.floor(total/60))}:${pad(total%60)}`;
+        };
+        const dateLabel=ms=>{const d=new Date(ms);return`${d.getDate()} ${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()]}`;};
+        const r24v=result.violations.filter(v=>v.type==="rolling24");
+        const goNoGo=result.violations.length===0;
         return(<div style={{marginTop:12,borderRadius:14,overflow:"hidden",border:"1.5px solid "+C.accent+"33",background:C.card}}>
+          {/* Header */}
           <div style={{padding:"10px 14px",background:C.panel,display:"flex",alignItems:"center",gap:8,borderBottom:"1px solid "+C.border}}>
             <span style={{fontSize:16}}>💡</span><div><div style={{fontSize:12,fontWeight:800,color:C.light}}>What This Means</div><div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>Plain English breakdown of your 10/24 assessment</div></div>
           </div>
-          <div style={{padding:"12px 14px"}}>
-            {lines.map((line,i)=>{const isV=line.type.startsWith("verdict");const vc=line.type==="verdict-pass"||line.type==="pass"?C.green:line.type==="verdict-fail"||line.type==="fail"?C.red:line.type==="calc"?C.gold:C.sub;
-              return(<div key={i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:isV?"14px 12px":"10px 0",marginBottom:i<lines.length-1?4:0,borderBottom:!isV&&i<lines.length-1?"1px solid "+C.border:"none",background:isV?vc+"12":"transparent",borderRadius:isV?10:0,marginTop:isV?8:0,border:isV?"1.5px solid "+vc+"33":"none"}}>
-                <span style={{fontSize:16,flexShrink:0,marginTop:1}}>{line.icon}</span>
-                <div style={{fontSize:13,color:isV?vc:C.text,lineHeight:1.7,fontWeight:isV?700:400}}>{line.text}</div>
-              </div>);})}
+
+          {/* 1. Crew rules summary */}
+          <div style={{padding:"12px 14px",borderBottom:"1px solid "+C.border,background:C.bg}}>
+            <div style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:8}}>
+              <span style={{background:C.accent,color:"#fff",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:800,letterSpacing:.4}}>👥 {lim.label.toUpperCase()}</span>
+              <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Duty max <b style={{color:C.text}}>{lim.duty}h</b></span>
+              <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Flight max <b style={{color:C.text}}>{lim.flight}h</b></span>
+              <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Min rest <b style={{color:C.text}}>{lim.rest}h</b></span>
+              <span style={{fontSize:11,color:C.sub,fontWeight:600}}>24h rolling <b style={{color:C.text}}>{lim.rolling24}h</b></span>
+            </div>
           </div>
-          <div style={{padding:"10px 14px",borderTop:"1px solid "+C.border,fontSize:10,color:C.muted,textAlign:"center",lineHeight:1.5}}>FAR 135.267/269 · {limits.label} · For planning purposes only</div>
+
+          {/* 2. Duty period sections + 3. Rest bars */}
+          <div style={{padding:"12px 14px"}}>
+            {result.dutyResults.map((dp,dpi)=>{
+              const dutyOk=dp.dutyHrs<=lim.duty,flightOk=dp.flightHrs<=lim.flight;
+              const dutyPct=Math.round(dp.dutyHrs/lim.duty*100),flightPct=Math.round(dp.flightHrs/lim.flight*100);
+              const restOk=dp.restBefore===undefined||dp.restBefore>=lim.rest;
+              const exceeded=!dutyOk||!flightOk||!restOk;
+              const caution=!exceeded&&((dutyPct>=80)||(flightPct>=80));
+              const dpLabel=exceeded?"EXCEEDED":caution?"CAUTION":"ALL CLEAR";
+              const dpColor=exceeded?C.red:caution?C.amber:C.green;
+              return(<React.Fragment key={dpi}>
+                {/* Rest bar between periods */}
+                {dpi>0&&dp.restBefore!==undefined&&(()=>{
+                  const ok=dp.restBefore>=lim.rest;
+                  return(<div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",margin:"4px 0 10px",background:(ok?C.green:C.red)+"14",borderRadius:10,border:"1px solid "+(ok?C.green:C.red)+"44"}}>
+                    <span style={{fontSize:14}}>🛏️</span>
+                    <div style={{flex:1,fontSize:12,color:C.text,fontWeight:600}}>
+                      Rest: <b style={{color:ok?C.green:C.red}}>{fmtHrs2(dp.restBefore)}</b>
+                      <span style={{color:C.muted,fontWeight:500}}> · minimum {lim.rest}h</span>
+                    </div>
+                    <span style={{fontSize:11,color:ok?C.green:C.red,fontWeight:800}}>{ok?"✅":"❌"}</span>
+                  </div>);
+                })()}
+                {/* DP card */}
+                <div style={{border:"1.5px solid "+dpColor+"55",borderRadius:12,marginBottom:10,overflow:"hidden",background:C.card}}>
+                  {/* DP header */}
+                  <div style={{padding:"10px 12px",background:dpColor+"12",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",borderBottom:"1px solid "+C.border}}>
+                    <span style={{background:dpColor,color:"#fff",borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800}}>DP {dpi+1}</span>
+                    <span style={{fontSize:12,color:C.text,fontWeight:600}}>{dateLabel(dp.dutyStart)}</span>
+                    <span style={{fontSize:11,color:C.muted,fontWeight:500}}>· {dp.legs.length} leg{dp.legs.length>1?"s":""}</span>
+                    <span style={{marginLeft:"auto",fontSize:10,color:dpColor,fontWeight:800,letterSpacing:.4}}>{dpLabel}</span>
+                  </div>
+                  {/* Route cards */}
+                  <div style={{padding:"10px 12px"}}>
+                    {dp.legs.map((leg,li)=>{
+                      const dl=localStr(leg.depH,leg.depM,leg.origin);
+                      const al=localStr(leg.arrH,leg.arrM,leg.dest);
+                      return(<div key={li} style={{background:C.bg,border:"1px solid "+C.border,borderRadius:10,padding:"10px 12px",marginBottom:li<dp.legs.length-1?8:0}}>
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+                          <div style={{fontSize:13,fontWeight:800,color:C.text,letterSpacing:.3}}>{leg.origin} → {leg.dest}</div>
+                          <div style={{fontSize:11,color:C.muted,fontWeight:700}}>✈️ {fmtHrs2(leg.flightMins/60)}</div>
+                        </div>
+                        <div style={{fontSize:11,color:C.sub,fontFamily:"ui-monospace,Menlo,monospace",marginBottom:dl&&al?2:0}}>
+                          {utcStr(leg.depH,leg.depM)} – {utcStr(leg.arrH,leg.arrM)} <span style={{color:C.muted,fontSize:10}}>(UTC)</span>
+                        </div>
+                        {dl&&al&&<div style={{fontSize:11,color:C.sub,fontFamily:"ui-monospace,Menlo,monospace"}}>
+                          {dl} {leg.origin} local → {al} {leg.dest} local
+                        </div>}
+                      </div>);
+                    })}
+                  </div>
+                  {/* Check rows */}
+                  <div style={{padding:"0 12px 10px"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderTop:"1px solid "+C.border}}>
+                      <span style={{fontSize:14,width:18,textAlign:"center"}}>{dutyOk?(dutyPct>=80?"⚠️":"✅"):"❌"}</span>
+                      <div style={{flex:1,fontSize:12,color:C.text}}>Duty time <b>{fmtHrs2(dp.dutyHrs)}</b> {dutyOk?"within":"exceeds"} {lim.duty}h limit</div>
+                      {dutyPct>=80&&<span style={{fontSize:11,fontWeight:800,color:!dutyOk?C.red:C.amber}}>{dutyPct}%</span>}
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderTop:"1px solid "+C.border}}>
+                      <span style={{fontSize:14,width:18,textAlign:"center"}}>{flightOk?(flightPct>=80?"⚠️":"✅"):"❌"}</span>
+                      <div style={{flex:1,fontSize:12,color:C.text}}>Flight time <b>{fmtHrs2(dp.flightHrs)}</b> {flightOk?"within":"exceeds"} {lim.flight}h limit</div>
+                      {flightPct>=80&&<span style={{fontSize:11,fontWeight:800,color:!flightOk?C.red:C.amber}}>{flightPct}%</span>}
+                    </div>
+                    {dp.restBefore!==undefined&&(()=>{
+                      const ok=dp.restBefore>=lim.rest;
+                      return(<div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderTop:"1px solid "+C.border}}>
+                        <span style={{fontSize:14,width:18,textAlign:"center"}}>{ok?"✅":"❌"}</span>
+                        <div style={{flex:1,fontSize:12,color:C.text}}>Rest before <b>{fmtHrs2(dp.restBefore)}</b> {ok?"meets":"below"} {lim.rest}h minimum</div>
+                      </div>);
+                    })()}
+                  </div>
+                </div>
+              </React.Fragment>);
+            })}
+
+            {/* 4. Rolling 24-hour check */}
+            {(()=>{
+              const ok=r24v.length===0;
+              return(<div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 12px",marginTop:4,background:(ok?C.green:C.red)+"14",borderRadius:10,border:"1px solid "+(ok?C.green:C.red)+"44"}}>
+                <span style={{fontSize:14}}>{ok?"✅":"❌"}</span>
+                <div style={{flex:1,fontSize:12,color:C.text,fontWeight:600}}>
+                  Rolling 24-hour flight time {ok?`within ${lim.rolling24}h limit`:`exceeded — ${r24v.length} violation${r24v.length>1?"s":""}`}
+                </div>
+                <span style={{fontSize:11,color:ok?C.green:C.red,fontWeight:800}}>{ok?"PASS":"FAIL"}</span>
+              </div>);
+            })()}
+
+            {/* 5. GO / NO-GO verdict */}
+            <div style={{marginTop:14,padding:"16px 14px",textAlign:"center",borderRadius:12,background:goNoGo?C.green:C.red,color:"#fff",fontSize:18,fontWeight:900,letterSpacing:1}}>
+              {goNoGo?"🟢 GO":"🔴 NO-GO"}
+              <div style={{fontSize:11,fontWeight:600,opacity:.9,marginTop:4,letterSpacing:.3}}>
+                {goNoGo?`All limits satisfied for ${lim.label} operations`:`${result.violations.length} violation${result.violations.length>1?"s":""} — not compliant with ${lim.reg}`}
+              </div>
+            </div>
+          </div>
+
+          {/* 6. Footer */}
+          <div style={{padding:"10px 14px",borderTop:"1px solid "+C.border,fontSize:10,color:C.muted,textAlign:"center",lineHeight:1.5}}>{lim.reg} · {lim.label} · For planning purposes only</div>
         </div>);
       })()}
 
