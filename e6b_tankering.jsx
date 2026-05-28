@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.25";
+const APP_VERSION="1.26";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3079,7 +3079,7 @@ function FlightDutyCalc(){
         return(<div key={i} style={{background:C.card,border:"1.5px solid "+wc+"44",borderRadius:14,padding:16,marginBottom:12}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{background:wc+"22",color:wc,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:800}}>DP {i+1}</span>
+              <span style={{background:wc+"22",color:wc,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:800}}>Duty Period {i+1}</span>
               <span style={{fontSize:12,color:C.text,fontWeight:700}}>{dp.legs.length} leg{dp.legs.length>1?"s":""}</span>
             </div>
             <span style={{fontSize:10,color:wc,fontWeight:700,textTransform:"uppercase"}}>{statusLabel(worst)}</span>
@@ -3113,7 +3113,7 @@ function FlightDutyCalc(){
           {/* Legs */}
           {dp.legs.map((leg,li)=>(
             <div key={li} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderTop:li>0?"1px solid "+C.border:"none",fontSize:12}}>
-              <span style={{color:C.accent,fontWeight:700,minWidth:16}}>L{(result.allLegs.findIndex(al=>al.depEpoch===leg.depEpoch))+1}</span>
+              <span style={{color:C.accent,fontWeight:700,minWidth:42}}>Leg {(result.allLegs.findIndex(al=>al.depEpoch===leg.depEpoch))+1}</span>
               <span style={{color:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
               <span style={{color:C.muted,flex:1,textAlign:"right"}}>{String(leg.depH).padStart(2,"0")}:{String(leg.depM).padStart(2,"0")}–{String(leg.arrH).padStart(2,"0")}:{String(leg.arrM).padStart(2,"0")}</span>
               <span style={{color:C.gold,fontWeight:700,minWidth:40,textAlign:"right"}}>{fmtHM(leg.flightMins)}</span>
@@ -3205,7 +3205,7 @@ function FlightDutyCalc(){
                 <div style={{border:"1.5px solid "+dpColor+"55",borderRadius:12,marginBottom:10,overflow:"hidden",background:C.card}}>
                   {/* DP header */}
                   <div style={{padding:"10px 12px",background:dpColor+"12",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",borderBottom:"1px solid "+C.border}}>
-                    <span style={{background:dpColor,color:"#fff",borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800}}>DP {dpi+1}</span>
+                    <span style={{background:dpColor,color:"#fff",borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800}}>Duty Period {dpi+1}</span>
                     <span style={{fontSize:12,color:C.text,fontWeight:600}}>{dateLabel(dp.dutyStart)}</span>
                     <span style={{fontSize:11,color:C.muted,fontWeight:500}}>· {dp.legs.length} leg{dp.legs.length>1?"s":""}</span>
                     <span style={{marginLeft:"auto",fontSize:10,color:dpColor,fontWeight:800,letterSpacing:.4}}>{dpLabel}</span>
@@ -3220,7 +3220,7 @@ function FlightDutyCalc(){
                       return(<div key={li} style={{background:C.bg,border:"1px solid "+C.border,borderLeft:"3px solid "+lc,borderRadius:10,padding:"10px 12px",marginBottom:li<dp.legs.length-1?8:0}}>
                         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,gap:8}}>
                           <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
-                            <span style={{background:lc,color:"#fff",borderRadius:5,padding:"2px 7px",fontSize:10,fontWeight:800,letterSpacing:.4,flexShrink:0}}>L{(globalIdx>=0?globalIdx:li)+1}</span>
+                            <span style={{background:lc,color:"#fff",borderRadius:5,padding:"2px 7px",fontSize:10,fontWeight:800,letterSpacing:.4,flexShrink:0}}>Leg {(globalIdx>=0?globalIdx:li)+1}</span>
                             <div style={{fontSize:13,fontWeight:800,color:C.text,letterSpacing:.3}}>{leg.origin} → {leg.dest}</div>
                           </div>
                           <div style={{fontSize:11,color:C.muted,fontWeight:700,flexShrink:0}}>✈️ {fmtHrs2(leg.flightMins/60)}</div>

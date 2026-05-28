@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.25";
+const APP_VERSION = "1.26";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -7528,7 +7528,7 @@ function FlightDutyCalc() {
         fontSize: 11,
         fontWeight: 800
       }
-    }, "DP ", i + 1), /*#__PURE__*/React.createElement("span", {
+    }, "Duty Period ", i + 1), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 12,
         color: C.text,
@@ -7744,9 +7744,9 @@ function FlightDutyCalc() {
       style: {
         color: C.accent,
         fontWeight: 700,
-        minWidth: 16
+        minWidth: 42
       }
-    }, "L", result.allLegs.findIndex(al => al.depEpoch === leg.depEpoch) + 1), /*#__PURE__*/React.createElement("span", {
+    }, "Leg ", result.allLegs.findIndex(al => al.depEpoch === leg.depEpoch) + 1), /*#__PURE__*/React.createElement("span", {
       style: {
         color: C.text,
         fontWeight: 700
@@ -8089,7 +8089,7 @@ function FlightDutyCalc() {
           fontSize: 11,
           fontWeight: 800
         }
-      }, "DP ", dpi + 1), /*#__PURE__*/React.createElement("span", {
+      }, "Duty Period ", dpi + 1), /*#__PURE__*/React.createElement("span", {
         style: {
           fontSize: 12,
           color: C.text,
@@ -8154,7 +8154,7 @@ function FlightDutyCalc() {
             letterSpacing: .4,
             flexShrink: 0
           }
-        }, "L", (globalIdx >= 0 ? globalIdx : li) + 1), /*#__PURE__*/React.createElement("div", {
+        }, "Leg ", (globalIdx >= 0 ? globalIdx : li) + 1), /*#__PURE__*/React.createElement("div", {
           style: {
             fontSize: 13,
             fontWeight: 800,
