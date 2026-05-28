@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.24";
+const APP_VERSION="1.25";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2900,13 +2900,8 @@ function FlightDutyCalc(){
         </div>);
       })}
       <button onClick={addManualLeg}
-        style={{width:"100%",padding:10,borderRadius:8,border:"1.5px dashed "+C.accent+"66",background:"transparent",color:C.accent,fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:12}}>
+        style={{width:"100%",padding:10,borderRadius:8,border:"1.5px dashed "+C.accent+"66",background:"transparent",color:C.accent,fontSize:13,fontWeight:700,cursor:"pointer"}}>
         + Add Leg
-      </button>
-      {parseError&&<div style={{fontSize:12,color:C.red,fontWeight:600,marginTop:4,marginBottom:8}}>{parseError}</div>}
-      <button onClick={parseManualLegs}
-        style={{width:"100%",padding:14,borderRadius:12,background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",border:"none",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer"}}>
-        Calculate Duty Times
       </button>
     </div>}
 
@@ -3048,6 +3043,15 @@ function FlightDutyCalc(){
         </div>
       </div>
     </div>
+
+    {/* ── CALCULATE (manual mode only, no result yet) ── */}
+    {!result&&!parsed&&dutyInputMode==="manual"&&<div style={{marginBottom:14}}>
+      {parseError&&<div style={{fontSize:12,color:C.red,fontWeight:600,marginBottom:8}}>{parseError}</div>}
+      <button onClick={parseManualLegs}
+        style={{width:"100%",padding:14,borderRadius:12,background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",border:"none",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer"}}>
+        Calculate Times
+      </button>
+    </div>}
 
     {/* ══ RESULTS ══ */}
     {result&&<div>
