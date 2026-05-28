@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.23";
+const APP_VERSION = "1.24";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -5884,9 +5884,10 @@ function FlightDutyCalc() {
     dest: "",
     depTime: "",
     arrTime: "",
-    depLocal: "",
-    arrLocal: "",
-    date: ""
+    depInput: "",
+    arrInput: "",
+    date: "",
+    mode: "Z"
   }]);
   const [pasteText, setPasteText] = useState("");
   const [parseError, setParseError] = useState("");
@@ -6196,9 +6197,10 @@ function FlightDutyCalc() {
       dest: "",
       depTime: "",
       arrTime: "",
-      depLocal: "",
-      arrLocal: "",
-      date: ls[ls.length - 1]?.date || ""
+      depInput: "",
+      arrInput: "",
+      date: ls[ls.length - 1]?.date || "",
+      mode: ls[ls.length - 1]?.mode || "Z"
     }]);
   }
   function removeManualLeg(i) {
@@ -6214,15 +6216,13 @@ function FlightDutyCalc() {
     if (s === undefined || s === "" || isNaN(s)) return null;
     return Number(s);
   }
-  // Normalize HH:MM input. Accepts "0800" → "08:00", strips non-digits/colons,
-  // caps at 5 chars. Does NOT pad short input (so partial typing stays partial).
+  // Normalize HH:MM input. "0800" → "08:00", strips non-digit/colon, caps 5.
+  // Partial input stays partial (so backspace + retype works).
   function normalizeHHMM(raw) {
     let v = (raw || "").replace(/[^0-9:]/g, "");
     if (v.length === 4 && !v.includes(":")) v = v.slice(0, 2) + ":" + v.slice(2);
     return v.slice(0, 5);
   }
-  // Convert "HH:MM" (length 5, both halves numeric) into total minutes-of-day.
-  // Returns null on incomplete/invalid input.
   function hhmmToMin(s) {
     if (!s || s.length !== 5 || s[2] !== ":") return null;
     const h = Number(s.slice(0, 2)),
@@ -6236,6 +6236,16 @@ function FlightDutyCalc() {
       m = t % 60;
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   }
+  // Convert between displayed-local and canonical-UTC HH:MM strings.
+  // Unknown ICAO offset is treated as +0 (per spec). Returns "" on partial input.
+  function localFromUtc(zulu, off) {
+    const m = hhmmToMin(zulu);
+    return m === null ? "" : minToHHMM(m + (off || 0) * 60);
+  }
+  function utcFromLocal(local, off) {
+    const m = hhmmToMin(local);
+    return m === null ? "" : minToHHMM(m - (off || 0) * 60);
+  }
   function updateManualLeg(i, field, val) {
     setManualLegs(ls => ls.map((l, j) => {
       if (j !== i) return l;
@@ -6243,43 +6253,59 @@ function FlightDutyCalc() {
         ...l,
         [field]: val
       };
-      // When origin/dest changes, re-derive the matching local field from the
-      // canonical zulu time (or clear it if the new ICAO is unknown).
-      if (field === "origin") {
-        const off = tzOffsetFor(val);
-        const z = hhmmToMin(next.depTime);
-        next.depLocal = off !== null && z !== null ? minToHHMM(z + off * 60) : "";
+      // Mode L pins the canonical UTC moment — switching ICAOs re-derives the
+      // displayed local time so the underlying depTime/arrTime stay constant.
+      if (next.mode === "L" && field === "origin") {
+        next.depInput = next.depTime ? localFromUtc(next.depTime, tzOffsetFor(val) || 0) : "";
       }
-      if (field === "dest") {
-        const off = tzOffsetFor(val);
-        const z = hhmmToMin(next.arrTime);
-        next.arrLocal = off !== null && z !== null ? minToHHMM(z + off * 60) : "";
+      if (next.mode === "L" && field === "dest") {
+        next.arrInput = next.arrTime ? localFromUtc(next.arrTime, tzOffsetFor(val) || 0) : "";
       }
       return next;
     }));
   }
-  // Bidirectional time setter. side: "dep" | "arr". type: "zulu" | "local".
-  // Editing zulu auto-fills local when the relevant ICAO has a known offset,
-  // and vice versa. The canonical stored value (depTime/arrTime) is always UTC.
-  function setManualLegTime(i, side, type, raw) {
+  // Switch a leg's Z/L mode. The canonical UTC (depTime/arrTime) is preserved;
+  // only the input buffer changes to show the same moment in the new mode.
+  function setManualLegMode(i, mode) {
+    setManualLegs(ls => ls.map((l, j) => {
+      if (j !== i) return l;
+      const next = {
+        ...l,
+        mode
+      };
+      if (mode === "Z") {
+        next.depInput = next.depTime || "";
+        next.arrInput = next.arrTime || "";
+      } else {
+        next.depInput = next.depTime ? localFromUtc(next.depTime, tzOffsetFor(next.origin) || 0) : "";
+        next.arrInput = next.arrTime ? localFromUtc(next.arrTime, tzOffsetFor(next.dest) || 0) : "";
+      }
+      return next;
+    }));
+  }
+  // Single-field time setter. The input buffer (depInput/arrInput) always
+  // mirrors what the user sees. The canonical UTC value (depTime/arrTime) is
+  // recomputed when the input is complete (5 chars) and cleared on partial.
+  function setManualLegTime(i, side, raw) {
     const v = normalizeHHMM(raw);
     setManualLegs(ls => ls.map((l, j) => {
       if (j !== i) return l;
       const next = {
         ...l
       };
-      const icao = side === "dep" ? l.origin : l.dest;
-      const off = tzOffsetFor(icao);
-      const zKey = side === "dep" ? "depTime" : "arrTime";
-      const lKey = side === "dep" ? "depLocal" : "arrLocal";
-      if (type === "zulu") {
-        next[zKey] = v;
-        const mins = hhmmToMin(v);
-        if (off !== null && mins !== null) next[lKey] = minToHHMM(mins + off * 60);else if (off !== null) next[lKey] = "";
+      const inKey = side === "dep" ? "depInput" : "arrInput";
+      const utcKey = side === "dep" ? "depTime" : "arrTime";
+      next[inKey] = v;
+      const mins = hhmmToMin(v);
+      if (mins === null) {
+        next[utcKey] = "";
+        return next;
+      }
+      if (next.mode === "Z") {
+        next[utcKey] = v;
       } else {
-        next[lKey] = v;
-        const mins = hhmmToMin(v);
-        if (off !== null && mins !== null) next[zKey] = minToHHMM(mins - off * 60);else if (off !== null) next[zKey] = "";
+        const off = tzOffsetFor(side === "dep" ? next.origin : next.dest) || 0;
+        next[utcKey] = utcFromLocal(v, off);
       }
       return next;
     }));
@@ -6497,26 +6523,38 @@ function FlightDutyCalc() {
     }
   }, "\u270F\uFE0F Enter Legs"), manualLegs.map((ml, i) => {
     const lc = dutyLegColor(i);
-    const depKnown = tzOffsetFor(ml.origin) !== null;
-    const arrKnown = tzOffsetFor(ml.dest) !== null;
-    const timeInputBase = {
+    const mode = ml.mode || "Z",
+      isL = mode === "L";
+    const modeColor = isL ? C.amber : C.accent;
+    const depUnknown = isL && ml.origin && tzOffsetFor(ml.origin) === null;
+    const arrUnknown = isL && ml.dest && tzOffsetFor(ml.dest) === null;
+    const timeBorderColor = isL ? C.amber : C.border;
+    const timeInputStyle = {
       width: "100%",
       background: C.card,
-      border: "1.5px solid " + C.border,
+      border: "1.5px solid " + timeBorderColor,
       borderRadius: 8,
       padding: "9px 8px",
       color: C.text,
-      fontSize: 15,
+      fontSize: 16,
       fontWeight: 700,
       textAlign: "center",
       letterSpacing: 1,
       boxSizing: "border-box"
     };
-    const timeInputDisabled = {
-      ...timeInputBase,
-      background: C.bg,
-      color: C.muted,
-      cursor: "not-allowed"
+    const icaoInputStyle = {
+      width: "100%",
+      background: C.card,
+      border: "1.5px solid " + C.border,
+      borderRadius: 8,
+      padding: "9px 6px",
+      color: C.text,
+      fontSize: 14,
+      fontWeight: 700,
+      textAlign: "center",
+      textTransform: "uppercase",
+      letterSpacing: 1,
+      boxSizing: "border-box"
     };
     return /*#__PURE__*/React.createElement("div", {
       key: i,
@@ -6532,19 +6570,88 @@ function FlightDutyCalc() {
       style: {
         display: "flex",
         alignItems: "center",
-        justifyContent: "space-between",
-        marginBottom: 8
+        gap: 6,
+        marginBottom: 8,
+        flexWrap: "wrap"
       }
-    }, /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement("span", {
       style: {
         background: lc,
         color: "#fff",
         borderRadius: 6,
-        padding: "3px 10px",
+        padding: "3px 8px",
         fontSize: 11,
-        fontWeight: 700
+        fontWeight: 800,
+        letterSpacing: .4,
+        flexShrink: 0
       }
-    }, "LEG ", i + 1), manualLegs.length > 1 && /*#__PURE__*/React.createElement("button", {
+    }, "LEG ", i + 1), /*#__PURE__*/React.createElement("input", {
+      type: "date",
+      value: ml.date,
+      onChange: e => updateManualLeg(i, "date", e.target.value),
+      style: {
+        flex: "1 1 130px",
+        minWidth: 120,
+        background: C.card,
+        border: "1.5px solid " + C.border,
+        borderRadius: 8,
+        padding: "7px 8px",
+        color: C.text,
+        fontSize: 12,
+        fontWeight: 700,
+        boxSizing: "border-box"
+      }
+    }), /*#__PURE__*/React.createElement("input", {
+      value: ml.origin,
+      onChange: e => updateManualLeg(i, "origin", e.target.value.toUpperCase().slice(0, 4)),
+      placeholder: "ICAO",
+      maxLength: 4,
+      style: {
+        ...icaoInputStyle,
+        flex: "1 1 56px",
+        minWidth: 56
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.muted,
+        fontSize: 13,
+        fontWeight: 700,
+        flexShrink: 0
+      }
+    }, "\u2192"), /*#__PURE__*/React.createElement("input", {
+      value: ml.dest,
+      onChange: e => updateManualLeg(i, "dest", e.target.value.toUpperCase().slice(0, 4)),
+      placeholder: "ICAO",
+      maxLength: 4,
+      style: {
+        ...icaoInputStyle,
+        flex: "1 1 56px",
+        minWidth: 56
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        background: C.card,
+        border: "1px solid " + C.border,
+        borderRadius: 6,
+        padding: 2,
+        flexShrink: 0
+      }
+    }, ["Z", "L"].map(m => /*#__PURE__*/React.createElement("button", {
+      key: m,
+      onClick: () => setManualLegMode(i, m),
+      style: {
+        padding: "4px 9px",
+        borderRadius: 4,
+        border: "none",
+        background: mode === m ? m === "L" ? C.amber : C.accent : "transparent",
+        color: mode === m ? "#fff" : C.muted,
+        fontSize: 11,
+        fontWeight: 800,
+        cursor: "pointer",
+        letterSpacing: .5
+      }
+    }, m))), manualLegs.length > 1 && /*#__PURE__*/React.createElement("button", {
       onClick: () => removeManualLeg(i),
       style: {
         background: "transparent",
@@ -6552,14 +6659,15 @@ function FlightDutyCalc() {
         color: C.red,
         fontSize: 16,
         cursor: "pointer",
-        padding: "2px 6px"
+        padding: "2px 6px",
+        flexShrink: 0
       }
     }, "\u2715")), /*#__PURE__*/React.createElement("div", {
       style: {
         display: "grid",
-        gridTemplateColumns: "1fr 1fr",
+        gridTemplateColumns: "1fr auto 1fr",
         gap: 8,
-        marginBottom: 8
+        alignItems: "end"
       }
     }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -6567,152 +6675,57 @@ function FlightDutyCalc() {
         color: C.muted,
         textTransform: "uppercase",
         letterSpacing: .5,
-        marginBottom: 4
+        marginBottom: 4,
+        display: "flex",
+        alignItems: "center",
+        gap: 4
       }
-    }, "Origin"), /*#__PURE__*/React.createElement("input", {
-      value: ml.origin,
-      onChange: e => updateManualLeg(i, "origin", e.target.value.toUpperCase().slice(0, 4)),
-      placeholder: "ICAO",
-      maxLength: 4,
+    }, /*#__PURE__*/React.createElement("span", null, "Dep \xB7 ", mode === "Z" ? "Zulu" : "Local" + (ml.origin ? " (" + ml.origin + ")" : "")), depUnknown && /*#__PURE__*/React.createElement("span", {
+      title: "Unknown ICAO \u2014 treated as UTC+0",
       style: {
-        width: "100%",
-        background: C.card,
-        border: "1.5px solid " + C.border,
-        borderRadius: 8,
-        padding: "9px 10px",
-        color: C.text,
-        fontSize: 15,
-        fontWeight: 700,
-        textTransform: "uppercase",
-        letterSpacing: 1,
-        boxSizing: "border-box"
+        color: C.amber,
+        fontWeight: 800
       }
-    })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 10,
-        color: C.muted,
-        textTransform: "uppercase",
-        letterSpacing: .5,
-        marginBottom: 4
-      }
-    }, "Destination"), /*#__PURE__*/React.createElement("input", {
-      value: ml.dest,
-      onChange: e => updateManualLeg(i, "dest", e.target.value.toUpperCase().slice(0, 4)),
-      placeholder: "ICAO",
-      maxLength: 4,
-      style: {
-        width: "100%",
-        background: C.card,
-        border: "1.5px solid " + C.border,
-        borderRadius: 8,
-        padding: "9px 10px",
-        color: C.text,
-        fontSize: 15,
-        fontWeight: 700,
-        textTransform: "uppercase",
-        letterSpacing: 1,
-        boxSizing: "border-box"
-      }
-    }))), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr",
-        gap: 8,
-        marginBottom: 8
-      }
-    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 10,
-        color: C.muted,
-        textTransform: "uppercase",
-        letterSpacing: .5,
-        marginBottom: 4
-      }
-    }, "Dep \xB7 Zulu"), /*#__PURE__*/React.createElement("input", {
-      value: ml.depTime,
-      onChange: e => setManualLegTime(i, "dep", "zulu", e.target.value),
+    }, "?")), /*#__PURE__*/React.createElement("input", {
+      value: ml.depInput || "",
+      onChange: e => setManualLegTime(i, "dep", e.target.value),
       placeholder: "HH:MM",
       maxLength: 5,
       inputMode: "numeric",
-      style: timeInputBase
-    })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: timeInputStyle
+    })), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.muted,
+        fontSize: 14,
+        fontWeight: 700,
+        paddingBottom: 11
+      }
+    }, "\u2014"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 10,
         color: C.muted,
         textTransform: "uppercase",
         letterSpacing: .5,
-        marginBottom: 4
+        marginBottom: 4,
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        justifyContent: "flex-end"
       }
-    }, "Dep \xB7 Local", ml.origin && " (" + ml.origin + ")"), /*#__PURE__*/React.createElement("input", {
-      value: depKnown ? ml.depLocal : "",
-      onChange: e => setManualLegTime(i, "dep", "local", e.target.value),
-      placeholder: depKnown ? "HH:MM" : "?",
-      maxLength: 5,
-      inputMode: "numeric",
-      disabled: !depKnown,
-      style: depKnown ? timeInputBase : timeInputDisabled
-    }))), /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement("span", null, "Arr \xB7 ", mode === "Z" ? "Zulu" : "Local" + (ml.dest ? " (" + ml.dest + ")" : "")), arrUnknown && /*#__PURE__*/React.createElement("span", {
+      title: "Unknown ICAO \u2014 treated as UTC+0",
       style: {
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr",
-        gap: 8,
-        marginBottom: 8
+        color: C.amber,
+        fontWeight: 800
       }
-    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 10,
-        color: C.muted,
-        textTransform: "uppercase",
-        letterSpacing: .5,
-        marginBottom: 4
-      }
-    }, "Arr \xB7 Zulu"), /*#__PURE__*/React.createElement("input", {
-      value: ml.arrTime,
-      onChange: e => setManualLegTime(i, "arr", "zulu", e.target.value),
+    }, "?")), /*#__PURE__*/React.createElement("input", {
+      value: ml.arrInput || "",
+      onChange: e => setManualLegTime(i, "arr", e.target.value),
       placeholder: "HH:MM",
       maxLength: 5,
       inputMode: "numeric",
-      style: timeInputBase
-    })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 10,
-        color: C.muted,
-        textTransform: "uppercase",
-        letterSpacing: .5,
-        marginBottom: 4
-      }
-    }, "Arr \xB7 Local", ml.dest && " (" + ml.dest + ")"), /*#__PURE__*/React.createElement("input", {
-      value: arrKnown ? ml.arrLocal : "",
-      onChange: e => setManualLegTime(i, "arr", "local", e.target.value),
-      placeholder: arrKnown ? "HH:MM" : "?",
-      maxLength: 5,
-      inputMode: "numeric",
-      disabled: !arrKnown,
-      style: arrKnown ? timeInputBase : timeInputDisabled
-    }))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 10,
-        color: C.muted,
-        textTransform: "uppercase",
-        letterSpacing: .5,
-        marginBottom: 4
-      }
-    }, "Date"), /*#__PURE__*/React.createElement("input", {
-      type: "date",
-      value: ml.date,
-      onChange: e => updateManualLeg(i, "date", e.target.value),
-      style: {
-        width: "100%",
-        background: C.card,
-        border: "1.5px solid " + C.border,
-        borderRadius: 8,
-        padding: "9px 10px",
-        color: C.text,
-        fontSize: 13,
-        fontWeight: 700,
-        boxSizing: "border-box"
-      }
-    })));
+      style: timeInputStyle
+    }))));
   }), /*#__PURE__*/React.createElement("button", {
     onClick: addManualLeg,
     style: {

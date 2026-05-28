@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.23";
+const APP_VERSION="1.24";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2434,7 +2434,7 @@ function FlightDutyCalc(){
   const wide=useWide();
   const[crewMode,setCrewMode]=useState(2);
   const[dutyInputMode,setDutyInputMode]=useState("import"); // "import" or "manual"
-  const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depLocal:"",arrLocal:"",date:""}]);
+  const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:"",mode:"Z"}]);
   const[pasteText,setPasteText]=useState("");
   const[parseError,setParseError]=useState("");
   const[parsed,setParsed]=useState(null);
@@ -2685,7 +2685,7 @@ function FlightDutyCalc(){
     setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
   }
 
-  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depLocal:"",arrLocal:"",date:ls[ls.length-1]?.date||""}]);}
+  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:ls[ls.length-1]?.date||"",mode:ls[ls.length-1]?.mode||"Z"}]);}
   function removeManualLeg(i){setManualLegs(ls=>ls.length<=1?ls:ls.filter((_,j)=>j!==i));}
 
   // Look up an airport's UTC offset from ICAO_TZ (or sessionTz override).
@@ -2697,15 +2697,13 @@ function FlightDutyCalc(){
     if(s===undefined||s===""||isNaN(s))return null;
     return Number(s);
   }
-  // Normalize HH:MM input. Accepts "0800" → "08:00", strips non-digits/colons,
-  // caps at 5 chars. Does NOT pad short input (so partial typing stays partial).
+  // Normalize HH:MM input. "0800" → "08:00", strips non-digit/colon, caps 5.
+  // Partial input stays partial (so backspace + retype works).
   function normalizeHHMM(raw){
     let v=(raw||"").replace(/[^0-9:]/g,"");
     if(v.length===4&&!v.includes(":"))v=v.slice(0,2)+":"+v.slice(2);
     return v.slice(0,5);
   }
-  // Convert "HH:MM" (length 5, both halves numeric) into total minutes-of-day.
-  // Returns null on incomplete/invalid input.
   function hhmmToMin(s){
     if(!s||s.length!==5||s[2]!==":")return null;
     const h=Number(s.slice(0,2)),m=Number(s.slice(3,5));
@@ -2717,48 +2715,57 @@ function FlightDutyCalc(){
     const h=Math.floor(t/60),m=t%60;
     return`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`;
   }
+  // Convert between displayed-local and canonical-UTC HH:MM strings.
+  // Unknown ICAO offset is treated as +0 (per spec). Returns "" on partial input.
+  function localFromUtc(zulu,off){const m=hhmmToMin(zulu);return m===null?"":minToHHMM(m+(off||0)*60);}
+  function utcFromLocal(local,off){const m=hhmmToMin(local);return m===null?"":minToHHMM(m-(off||0)*60);}
 
   function updateManualLeg(i,field,val){
     setManualLegs(ls=>ls.map((l,j)=>{
       if(j!==i)return l;
       const next={...l,[field]:val};
-      // When origin/dest changes, re-derive the matching local field from the
-      // canonical zulu time (or clear it if the new ICAO is unknown).
-      if(field==="origin"){
-        const off=tzOffsetFor(val);
-        const z=hhmmToMin(next.depTime);
-        next.depLocal=(off!==null&&z!==null)?minToHHMM(z+off*60):"";
+      // Mode L pins the canonical UTC moment — switching ICAOs re-derives the
+      // displayed local time so the underlying depTime/arrTime stay constant.
+      if(next.mode==="L"&&field==="origin"){
+        next.depInput=next.depTime?localFromUtc(next.depTime,tzOffsetFor(val)||0):"";
       }
-      if(field==="dest"){
-        const off=tzOffsetFor(val);
-        const z=hhmmToMin(next.arrTime);
-        next.arrLocal=(off!==null&&z!==null)?minToHHMM(z+off*60):"";
+      if(next.mode==="L"&&field==="dest"){
+        next.arrInput=next.arrTime?localFromUtc(next.arrTime,tzOffsetFor(val)||0):"";
       }
       return next;
     }));
   }
-  // Bidirectional time setter. side: "dep" | "arr". type: "zulu" | "local".
-  // Editing zulu auto-fills local when the relevant ICAO has a known offset,
-  // and vice versa. The canonical stored value (depTime/arrTime) is always UTC.
-  function setManualLegTime(i,side,type,raw){
+  // Switch a leg's Z/L mode. The canonical UTC (depTime/arrTime) is preserved;
+  // only the input buffer changes to show the same moment in the new mode.
+  function setManualLegMode(i,mode){
+    setManualLegs(ls=>ls.map((l,j)=>{
+      if(j!==i)return l;
+      const next={...l,mode};
+      if(mode==="Z"){next.depInput=next.depTime||"";next.arrInput=next.arrTime||"";}
+      else{
+        next.depInput=next.depTime?localFromUtc(next.depTime,tzOffsetFor(next.origin)||0):"";
+        next.arrInput=next.arrTime?localFromUtc(next.arrTime,tzOffsetFor(next.dest)||0):"";
+      }
+      return next;
+    }));
+  }
+  // Single-field time setter. The input buffer (depInput/arrInput) always
+  // mirrors what the user sees. The canonical UTC value (depTime/arrTime) is
+  // recomputed when the input is complete (5 chars) and cleared on partial.
+  function setManualLegTime(i,side,raw){
     const v=normalizeHHMM(raw);
     setManualLegs(ls=>ls.map((l,j)=>{
       if(j!==i)return l;
       const next={...l};
-      const icao=side==="dep"?l.origin:l.dest;
-      const off=tzOffsetFor(icao);
-      const zKey=side==="dep"?"depTime":"arrTime";
-      const lKey=side==="dep"?"depLocal":"arrLocal";
-      if(type==="zulu"){
-        next[zKey]=v;
-        const mins=hhmmToMin(v);
-        if(off!==null&&mins!==null)next[lKey]=minToHHMM(mins+off*60);
-        else if(off!==null)next[lKey]="";
-      }else{
-        next[lKey]=v;
-        const mins=hhmmToMin(v);
-        if(off!==null&&mins!==null)next[zKey]=minToHHMM(mins-off*60);
-        else if(off!==null)next[zKey]="";
+      const inKey=side==="dep"?"depInput":"arrInput";
+      const utcKey=side==="dep"?"depTime":"arrTime";
+      next[inKey]=v;
+      const mins=hhmmToMin(v);
+      if(mins===null){next[utcKey]="";return next;}
+      if(next.mode==="Z"){next[utcKey]=v;}
+      else{
+        const off=tzOffsetFor(side==="dep"?next.origin:next.dest)||0;
+        next[utcKey]=utcFromLocal(v,off);
       }
       return next;
     }));
@@ -2851,55 +2858,44 @@ function FlightDutyCalc(){
       <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:12}}>✏️ Enter Legs</div>
       {manualLegs.map((ml,i)=>{
         const lc=dutyLegColor(i);
-        const depKnown=tzOffsetFor(ml.origin)!==null;
-        const arrKnown=tzOffsetFor(ml.dest)!==null;
-        const timeInputBase={width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 8px",color:C.text,fontSize:15,fontWeight:700,textAlign:"center",letterSpacing:1,boxSizing:"border-box"};
-        const timeInputDisabled={...timeInputBase,background:C.bg,color:C.muted,cursor:"not-allowed"};
+        const mode=ml.mode||"Z",isL=mode==="L";
+        const modeColor=isL?C.amber:C.accent;
+        const depUnknown=isL&&ml.origin&&tzOffsetFor(ml.origin)===null;
+        const arrUnknown=isL&&ml.dest&&tzOffsetFor(ml.dest)===null;
+        const timeBorderColor=isL?C.amber:C.border;
+        const timeInputStyle={width:"100%",background:C.card,border:"1.5px solid "+timeBorderColor,borderRadius:8,padding:"9px 8px",color:C.text,fontSize:16,fontWeight:700,textAlign:"center",letterSpacing:1,boxSizing:"border-box"};
+        const icaoInputStyle={width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 6px",color:C.text,fontSize:14,fontWeight:700,textAlign:"center",textTransform:"uppercase",letterSpacing:1,boxSizing:"border-box"};
         return(<div key={i} style={{background:C.bg,borderRadius:10,padding:12,marginBottom:10,border:"1px solid "+C.border,borderLeft:"3px solid "+lc}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-            <div style={{background:lc,color:"#fff",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:700}}>LEG {i+1}</div>
-            {manualLegs.length>1&&<button onClick={()=>removeManualLeg(i)} style={{background:"transparent",border:"none",color:C.red,fontSize:16,cursor:"pointer",padding:"2px 6px"}}>✕</button>}
-          </div>
-          {/* Row 1: Origin | Destination */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Origin</div>
-              <input value={ml.origin} onChange={e=>updateManualLeg(i,"origin",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4}
-                style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 10px",color:C.text,fontSize:15,fontWeight:700,textTransform:"uppercase",letterSpacing:1,boxSizing:"border-box"}}/>
-            </div>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Destination</div>
-              <input value={ml.dest} onChange={e=>updateManualLeg(i,"dest",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4}
-                style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 10px",color:C.text,fontSize:15,fontWeight:700,textTransform:"uppercase",letterSpacing:1,boxSizing:"border-box"}}/>
-            </div>
-          </div>
-          {/* Row 2: Dep Zulu | Dep Local */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Dep · Zulu</div>
-              <input value={ml.depTime} onChange={e=>setManualLegTime(i,"dep","zulu",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputBase}/>
-            </div>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Dep · Local{ml.origin&&" ("+ml.origin+")"}</div>
-              <input value={depKnown?ml.depLocal:""} onChange={e=>setManualLegTime(i,"dep","local",e.target.value)} placeholder={depKnown?"HH:MM":"?"} maxLength={5} inputMode="numeric" disabled={!depKnown} style={depKnown?timeInputBase:timeInputDisabled}/>
-            </div>
-          </div>
-          {/* Row 3: Arr Zulu | Arr Local */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Arr · Zulu</div>
-              <input value={ml.arrTime} onChange={e=>setManualLegTime(i,"arr","zulu",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputBase}/>
-            </div>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Arr · Local{ml.dest&&" ("+ml.dest+")"}</div>
-              <input value={arrKnown?ml.arrLocal:""} onChange={e=>setManualLegTime(i,"arr","local",e.target.value)} placeholder={arrKnown?"HH:MM":"?"} maxLength={5} inputMode="numeric" disabled={!arrKnown} style={arrKnown?timeInputBase:timeInputDisabled}/>
-            </div>
-          </div>
-          {/* Row 4: Date */}
-          <div>
-            <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Date</div>
+          {/* Row 1: badge · date · origin → dest · Z|L toggle · X */}
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+            <span style={{background:lc,color:"#fff",borderRadius:6,padding:"3px 8px",fontSize:11,fontWeight:800,letterSpacing:.4,flexShrink:0}}>LEG {i+1}</span>
             <input type="date" value={ml.date} onChange={e=>updateManualLeg(i,"date",e.target.value)}
-              style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 10px",color:C.text,fontSize:13,fontWeight:700,boxSizing:"border-box"}}/>
+              style={{flex:"1 1 130px",minWidth:120,background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"7px 8px",color:C.text,fontSize:12,fontWeight:700,boxSizing:"border-box"}}/>
+            <input value={ml.origin} onChange={e=>updateManualLeg(i,"origin",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoInputStyle,flex:"1 1 56px",minWidth:56}}/>
+            <span style={{color:C.muted,fontSize:13,fontWeight:700,flexShrink:0}}>→</span>
+            <input value={ml.dest} onChange={e=>updateManualLeg(i,"dest",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoInputStyle,flex:"1 1 56px",minWidth:56}}/>
+            <div style={{display:"flex",background:C.card,border:"1px solid "+C.border,borderRadius:6,padding:2,flexShrink:0}}>
+              {["Z","L"].map(m=>(<button key={m} onClick={()=>setManualLegMode(i,m)} style={{padding:"4px 9px",borderRadius:4,border:"none",background:mode===m?(m==="L"?C.amber:C.accent):"transparent",color:mode===m?"#fff":C.muted,fontSize:11,fontWeight:800,cursor:"pointer",letterSpacing:.5}}>{m}</button>))}
+            </div>
+            {manualLegs.length>1&&<button onClick={()=>removeManualLeg(i)} style={{background:"transparent",border:"none",color:C.red,fontSize:16,cursor:"pointer",padding:"2px 6px",flexShrink:0}}>✕</button>}
+          </div>
+          {/* Row 2: dep — arr */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,alignItems:"end"}}>
+            <div>
+              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:4}}>
+                <span>Dep · {mode==="Z"?"Zulu":"Local"+(ml.origin?" ("+ml.origin+")":"")}</span>
+                {depUnknown&&<span title="Unknown ICAO — treated as UTC+0" style={{color:C.amber,fontWeight:800}}>?</span>}
+              </div>
+              <input value={ml.depInput||""} onChange={e=>setManualLegTime(i,"dep",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputStyle}/>
+            </div>
+            <span style={{color:C.muted,fontSize:14,fontWeight:700,paddingBottom:11}}>—</span>
+            <div>
+              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
+                <span>Arr · {mode==="Z"?"Zulu":"Local"+(ml.dest?" ("+ml.dest+")":"")}</span>
+                {arrUnknown&&<span title="Unknown ICAO — treated as UTC+0" style={{color:C.amber,fontWeight:800}}>?</span>}
+              </div>
+              <input value={ml.arrInput||""} onChange={e=>setManualLegTime(i,"arr",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputStyle}/>
+            </div>
           </div>
         </div>);
       })}
