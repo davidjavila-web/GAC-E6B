@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.22";
+const APP_VERSION="1.23";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -95,21 +95,35 @@ const ICAO_TZ={
   // Canada
   CYYZ:-4,CYUL:-4,CYVR:-7,
   // Caribbean / Central America
-  MYNN:-4,MMTO:-5,MMMX:-5,MMUN:-5,MKJS:-5,MKJP:-5,TJSJ:-4,MDPC:-4,
+  MYNN:-4,MMTO:-5,MMMX:-5,MMUN:-5,MKJS:-5,MKJP:-5,TJSJ:-4,MDPC:-4,MTPP:-5,
   // South America
   SBGR:-3,SBRJ:-3,SCEL:-4,SAEZ:-3,
-  // UK
-  EGLL:1,EGKK:1,EGSS:1,EGGW:1,EGCC:1,
-  // Europe
-  LFPG:2,LFPB:2,EDDF:2,EDDM:2,EDDB:2,LIRF:2,LEMD:2,LEBL:2,LSGG:2,LSZH:2,EHAM:2,EBBR:2,LOWW:2,LGAV:3,LTBA:3,
+  // UK / Iberia
+  EGLL:1,EGKK:1,EGSS:1,EGGW:1,EGCC:1,LPPT:0,
+  // France / Iberia
+  LFPG:1,LFPB:2,LFPO:1,LEMD:1,LEBL:1,
+  // Central / Western Europe
+  EDDF:1,EDDM:1,EDDB:2,EHAM:1,EBBR:2,LOWW:1,LSZH:1,LSGG:1,
+  // Italy
+  LIRF:1,LIRA:1,LIPZ:1,LIME:1,LIBD:1,
+  // Nordics
+  EKCH:1,ENGM:1,ESSA:1,EFHK:2,
+  // Eastern Mediterranean / Turkey / Israel
+  LGAV:2,LTBA:3,LTFM:3,LLBG:2,
   // Middle East
   OMDB:4,OMAA:4,OTHH:3,OEJN:3,OERK:3,
-  // Asia / Oceania
-  VHHH:8,RJTT:9,RJBB:9,RCTP:8,WSSS:8,YSSY:10,YMML:10,NZAA:12
+  // Asia
+  VHHH:8,RJTT:9,RJBB:9,RJAA:9,RKSI:9,RCTP:8,WSSS:8,VTBS:7,RPLL:8,
+  // Oceania
+  YSSY:10,YMML:10,NZAA:12
 };
 
 const C={bg:"#f0f2f5",panel:"#1b2a4a",card:"#ffffff",border:"#d8dce3",accent:"#2563eb",gold:"#d97706",green:"#059669",red:"#dc2626",amber:"#d97706",muted:"#7c8494",text:"#0f172a",sub:"#475569",light:"#ffffff",inputBg:"#e8ebf0"};
 const LEG_COLORS=["#4a7fa5","#5a8f7a","#8a7a5a","#7a5a8a","#4a7a6a","#7a6a4a","#5a6a8a","#8a5a6a"];
+// Rotating accent palette used in the 10/24 tab (manual entry leg cards + explanation panel route cards).
+// Indexed by global leg position; wraps after the 6th leg.
+const DUTY_LEG_COLORS=[C.accent /* blue */,"#0891b2" /* teal */,"#d97706" /* amber */,"#7c3aed" /* purple */,"#059669" /* green */,"#dc2626" /* red */];
+const dutyLegColor=i=>DUTY_LEG_COLORS[i%DUTY_LEG_COLORS.length];
 
 const fL=n=>Number(n||0).toLocaleString(undefined,{maximumFractionDigits:0})+" lbs";
 const fG=n=>(Number(n||0)/LBS_PER_GAL).toLocaleString(undefined,{maximumFractionDigits:0})+" gal";
@@ -2420,7 +2434,7 @@ function FlightDutyCalc(){
   const wide=useWide();
   const[crewMode,setCrewMode]=useState(2);
   const[dutyInputMode,setDutyInputMode]=useState("import"); // "import" or "manual"
-  const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",date:""}]);
+  const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depLocal:"",arrLocal:"",date:""}]);
   const[pasteText,setPasteText]=useState("");
   const[parseError,setParseError]=useState("");
   const[parsed,setParsed]=useState(null);
@@ -2481,8 +2495,8 @@ function FlightDutyCalc(){
         setParsed(p);setNeedDate(p.needDate);setPasteText(text);setPastedImg(null);
         const unknown={};
         p.legs.forEach(l=>{
-          if(l.origin&&!ICAO_TZ[l.origin]&&!sessionTz[l.origin])unknown[l.origin]=0;
-          if(l.dest&&!ICAO_TZ[l.dest]&&!sessionTz[l.dest])unknown[l.dest]=0;
+          if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
+          if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
         });
         setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
         setImportMsg("✅ "+p.legs.length+" legs read from screenshot");
@@ -2544,8 +2558,8 @@ function FlightDutyCalc(){
         setParsed(p);setNeedDate(p.needDate);setPasteText(allText);
         const unknown={};
         p.legs.forEach(l=>{
-          if(l.origin&&!ICAO_TZ[l.origin]&&!sessionTz[l.origin])unknown[l.origin]=0;
-          if(l.dest&&!ICAO_TZ[l.dest]&&!sessionTz[l.dest])unknown[l.dest]=0;
+          if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
+          if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
         });
         setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
         setImportMsg("✅ "+p.legs.length+" legs extracted from PDF");
@@ -2583,8 +2597,8 @@ function FlightDutyCalc(){
         setParsed(p);setNeedDate(p.needDate);setPasteText(text);
         const unknown={};
         p.legs.forEach(l=>{
-          if(l.origin&&!ICAO_TZ[l.origin]&&!sessionTz[l.origin])unknown[l.origin]=0;
-          if(l.dest&&!ICAO_TZ[l.dest]&&!sessionTz[l.dest])unknown[l.dest]=0;
+          if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
+          if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
         });
         setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
         setImportMsg("✅ "+p.legs.length+" legs read from image");
@@ -2665,15 +2679,90 @@ function FlightDutyCalc(){
     setParsed(p);setNeedDate(p.needDate);
     const unknown={};
     p.legs.forEach(l=>{
-      if(l.origin&&!ICAO_TZ[l.origin]&&!sessionTz[l.origin])unknown[l.origin]=0;
-      if(l.dest&&!ICAO_TZ[l.dest]&&!sessionTz[l.dest])unknown[l.dest]=0;
+      if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
+      if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
     });
     setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
   }
 
-  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",date:ls[ls.length-1]?.date||""}]);}
+  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depLocal:"",arrLocal:"",date:ls[ls.length-1]?.date||""}]);}
   function removeManualLeg(i){setManualLegs(ls=>ls.length<=1?ls:ls.filter((_,j)=>j!==i));}
-  function updateManualLeg(i,field,val){setManualLegs(ls=>ls.map((l,j)=>j===i?{...l,[field]:val}:l));}
+
+  // Look up an airport's UTC offset from ICAO_TZ (or sessionTz override).
+  // Returns null when the ICAO is unknown so callers can branch cleanly.
+  function tzOffsetFor(icao){
+    if(!icao)return null;
+    if(icao in ICAO_TZ)return ICAO_TZ[icao];
+    const s=sessionTz[icao];
+    if(s===undefined||s===""||isNaN(s))return null;
+    return Number(s);
+  }
+  // Normalize HH:MM input. Accepts "0800" → "08:00", strips non-digits/colons,
+  // caps at 5 chars. Does NOT pad short input (so partial typing stays partial).
+  function normalizeHHMM(raw){
+    let v=(raw||"").replace(/[^0-9:]/g,"");
+    if(v.length===4&&!v.includes(":"))v=v.slice(0,2)+":"+v.slice(2);
+    return v.slice(0,5);
+  }
+  // Convert "HH:MM" (length 5, both halves numeric) into total minutes-of-day.
+  // Returns null on incomplete/invalid input.
+  function hhmmToMin(s){
+    if(!s||s.length!==5||s[2]!==":")return null;
+    const h=Number(s.slice(0,2)),m=Number(s.slice(3,5));
+    if(!Number.isFinite(h)||!Number.isFinite(m))return null;
+    return h*60+m;
+  }
+  function minToHHMM(total){
+    const t=((total%1440)+1440)%1440;
+    const h=Math.floor(t/60),m=t%60;
+    return`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`;
+  }
+
+  function updateManualLeg(i,field,val){
+    setManualLegs(ls=>ls.map((l,j)=>{
+      if(j!==i)return l;
+      const next={...l,[field]:val};
+      // When origin/dest changes, re-derive the matching local field from the
+      // canonical zulu time (or clear it if the new ICAO is unknown).
+      if(field==="origin"){
+        const off=tzOffsetFor(val);
+        const z=hhmmToMin(next.depTime);
+        next.depLocal=(off!==null&&z!==null)?minToHHMM(z+off*60):"";
+      }
+      if(field==="dest"){
+        const off=tzOffsetFor(val);
+        const z=hhmmToMin(next.arrTime);
+        next.arrLocal=(off!==null&&z!==null)?minToHHMM(z+off*60):"";
+      }
+      return next;
+    }));
+  }
+  // Bidirectional time setter. side: "dep" | "arr". type: "zulu" | "local".
+  // Editing zulu auto-fills local when the relevant ICAO has a known offset,
+  // and vice versa. The canonical stored value (depTime/arrTime) is always UTC.
+  function setManualLegTime(i,side,type,raw){
+    const v=normalizeHHMM(raw);
+    setManualLegs(ls=>ls.map((l,j)=>{
+      if(j!==i)return l;
+      const next={...l};
+      const icao=side==="dep"?l.origin:l.dest;
+      const off=tzOffsetFor(icao);
+      const zKey=side==="dep"?"depTime":"arrTime";
+      const lKey=side==="dep"?"depLocal":"arrLocal";
+      if(type==="zulu"){
+        next[zKey]=v;
+        const mins=hhmmToMin(v);
+        if(off!==null&&mins!==null)next[lKey]=minToHHMM(mins+off*60);
+        else if(off!==null)next[lKey]="";
+      }else{
+        next[lKey]=v;
+        const mins=hhmmToMin(v);
+        if(off!==null&&mins!==null)next[zKey]=minToHHMM(mins-off*60);
+        else if(off!==null)next[zKey]="";
+      }
+      return next;
+    }));
+  }
 
   function parseManualLegs(){
     const legs=[];
@@ -2699,8 +2788,8 @@ function FlightDutyCalc(){
     setParseError("");
     const unknown={};
     legs.forEach(l=>{
-      if(l.origin&&!ICAO_TZ[l.origin]&&!sessionTz[l.origin])unknown[l.origin]=0;
-      if(l.dest&&!ICAO_TZ[l.dest]&&!sessionTz[l.dest])unknown[l.dest]=0;
+      if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
+      if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
     });
     setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
     setParsed({legs,needDate:!legs[0].date});
@@ -2760,12 +2849,18 @@ function FlightDutyCalc(){
     {/* ── MANUAL ENTRY ── */}
     {!result&&!parsed&&dutyInputMode==="manual"&&<div style={{background:C.card,border:"1.5px solid "+C.accent+"55",borderRadius:12,padding:16,marginBottom:14}}>
       <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:12}}>✏️ Enter Legs</div>
-      {manualLegs.map((ml,i)=>(
-        <div key={i} style={{background:C.bg,borderRadius:10,padding:12,marginBottom:10,border:"1px solid "+C.border}}>
+      {manualLegs.map((ml,i)=>{
+        const lc=dutyLegColor(i);
+        const depKnown=tzOffsetFor(ml.origin)!==null;
+        const arrKnown=tzOffsetFor(ml.dest)!==null;
+        const timeInputBase={width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 8px",color:C.text,fontSize:15,fontWeight:700,textAlign:"center",letterSpacing:1,boxSizing:"border-box"};
+        const timeInputDisabled={...timeInputBase,background:C.bg,color:C.muted,cursor:"not-allowed"};
+        return(<div key={i} style={{background:C.bg,borderRadius:10,padding:12,marginBottom:10,border:"1px solid "+C.border,borderLeft:"3px solid "+lc}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-            <div style={{background:C.accent,color:"#fff",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:700}}>LEG {i+1}</div>
+            <div style={{background:lc,color:"#fff",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:700}}>LEG {i+1}</div>
             {manualLegs.length>1&&<button onClick={()=>removeManualLeg(i)} style={{background:"transparent",border:"none",color:C.red,fontSize:16,cursor:"pointer",padding:"2px 6px"}}>✕</button>}
           </div>
+          {/* Row 1: Origin | Destination */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
             <div>
               <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Origin</div>
@@ -2778,25 +2873,36 @@ function FlightDutyCalc(){
                 style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 10px",color:C.text,fontSize:15,fontWeight:700,textTransform:"uppercase",letterSpacing:1,boxSizing:"border-box"}}/>
             </div>
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+          {/* Row 2: Dep Zulu | Dep Local */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
             <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Dep (UTC)</div>
-              <input value={ml.depTime} onChange={e=>{let v=e.target.value.replace(/[^0-9:]/g,"");if(v.length===4&&!v.includes(":"))v=v.slice(0,2)+":"+v.slice(2);updateManualLeg(i,"depTime",v.slice(0,5));}} placeholder="HH:MM" maxLength={5} inputMode="numeric"
-                style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 8px",color:C.text,fontSize:15,fontWeight:700,textAlign:"center",letterSpacing:1,boxSizing:"border-box"}}/>
+              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Dep · Zulu</div>
+              <input value={ml.depTime} onChange={e=>setManualLegTime(i,"dep","zulu",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputBase}/>
             </div>
             <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Arr (UTC)</div>
-              <input value={ml.arrTime} onChange={e=>{let v=e.target.value.replace(/[^0-9:]/g,"");if(v.length===4&&!v.includes(":"))v=v.slice(0,2)+":"+v.slice(2);updateManualLeg(i,"arrTime",v.slice(0,5));}} placeholder="HH:MM" maxLength={5} inputMode="numeric"
-                style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 8px",color:C.text,fontSize:15,fontWeight:700,textAlign:"center",letterSpacing:1,boxSizing:"border-box"}}/>
-            </div>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Date</div>
-              <input type="date" value={ml.date} onChange={e=>updateManualLeg(i,"date",e.target.value)}
-                style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 6px",color:C.text,fontSize:13,fontWeight:700,boxSizing:"border-box"}}/>
+              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Dep · Local{ml.origin&&" ("+ml.origin+")"}</div>
+              <input value={depKnown?ml.depLocal:""} onChange={e=>setManualLegTime(i,"dep","local",e.target.value)} placeholder={depKnown?"HH:MM":"?"} maxLength={5} inputMode="numeric" disabled={!depKnown} style={depKnown?timeInputBase:timeInputDisabled}/>
             </div>
           </div>
-        </div>
-      ))}
+          {/* Row 3: Arr Zulu | Arr Local */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            <div>
+              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Arr · Zulu</div>
+              <input value={ml.arrTime} onChange={e=>setManualLegTime(i,"arr","zulu",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputBase}/>
+            </div>
+            <div>
+              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Arr · Local{ml.dest&&" ("+ml.dest+")"}</div>
+              <input value={arrKnown?ml.arrLocal:""} onChange={e=>setManualLegTime(i,"arr","local",e.target.value)} placeholder={arrKnown?"HH:MM":"?"} maxLength={5} inputMode="numeric" disabled={!arrKnown} style={arrKnown?timeInputBase:timeInputDisabled}/>
+            </div>
+          </div>
+          {/* Row 4: Date */}
+          <div>
+            <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Date</div>
+            <input type="date" value={ml.date} onChange={e=>updateManualLeg(i,"date",e.target.value)}
+              style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 10px",color:C.text,fontSize:13,fontWeight:700,boxSizing:"border-box"}}/>
+          </div>
+        </div>);
+      })}
       <button onClick={addManualLeg}
         style={{width:"100%",padding:10,borderRadius:8,border:"1.5px dashed "+C.accent+"66",background:"transparent",color:C.accent,fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:12}}>
         + Add Leg
@@ -3109,10 +3215,15 @@ function FlightDutyCalc(){
                     {dp.legs.map((leg,li)=>{
                       const dl=localStr(leg.depH,leg.depM,leg.origin);
                       const al=localStr(leg.arrH,leg.arrM,leg.dest);
-                      return(<div key={li} style={{background:C.bg,border:"1px solid "+C.border,borderRadius:10,padding:"10px 12px",marginBottom:li<dp.legs.length-1?8:0}}>
-                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
-                          <div style={{fontSize:13,fontWeight:800,color:C.text,letterSpacing:.3}}>{leg.origin} → {leg.dest}</div>
-                          <div style={{fontSize:11,color:C.muted,fontWeight:700}}>✈️ {fmtHrs2(leg.flightMins/60)}</div>
+                      const globalIdx=result.allLegs.findIndex(a=>a.depEpoch===leg.depEpoch&&a.origin===leg.origin&&a.dest===leg.dest);
+                      const lc=dutyLegColor(globalIdx>=0?globalIdx:li);
+                      return(<div key={li} style={{background:C.bg,border:"1px solid "+C.border,borderLeft:"3px solid "+lc,borderRadius:10,padding:"10px 12px",marginBottom:li<dp.legs.length-1?8:0}}>
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6,gap:8}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+                            <span style={{background:lc,color:"#fff",borderRadius:5,padding:"2px 7px",fontSize:10,fontWeight:800,letterSpacing:.4,flexShrink:0}}>L{(globalIdx>=0?globalIdx:li)+1}</span>
+                            <div style={{fontSize:13,fontWeight:800,color:C.text,letterSpacing:.3}}>{leg.origin} → {leg.dest}</div>
+                          </div>
+                          <div style={{fontSize:11,color:C.muted,fontWeight:700,flexShrink:0}}>✈️ {fmtHrs2(leg.flightMins/60)}</div>
                         </div>
                         <div style={{fontSize:11,color:C.sub,fontFamily:"ui-monospace,Menlo,monospace",marginBottom:dl&&al?2:0}}>
                           {utcStr(leg.depH,leg.depM)} – {utcStr(leg.arrH,leg.arrM)} <span style={{color:C.muted,fontSize:10}}>(UTC)</span>
