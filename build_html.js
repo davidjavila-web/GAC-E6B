@@ -35,7 +35,15 @@ const HEAD = '<!DOCTYPE html><html lang="en"><head>'
   + 'input,select,textarea{font-size:16px!important}'
   + '#root{padding-bottom:env(safe-area-inset-bottom)}'
   + '</style>'
-  + '</head><body><div id="root"></div><script>\n'
+  + '</head><body>'
+  // Theme bootstrap: set background + status-bar color from the saved/system
+  // preference BEFORE the React bundle paints, to avoid a light-mode flash.
+  + '<script>(function(){try{var m=localStorage.getItem("e6b:theme");m=m?JSON.parse(m):"auto";'
+  + 'var d=(m==="dark")||((m==="auto")&&window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);'
+  + 'var bg=d?"#0b1220":"#f0f2f5",panel=d?"#0f1829":"#1b2a4a";'
+  + 'document.documentElement.style.background=bg;document.body.style.background=bg;'
+  + 'var mt=document.querySelector(\'meta[name=theme-color]\');if(mt)mt.setAttribute("content",panel);}catch(e){}})();</script>'
+  + '<div id="root"></div><script>\n'
   + 'var _React=React,useState=_React.useState,useEffect=_React.useEffect,useRef=_React.useRef;\n';
 
 const TAIL = '\n</script></body></html>';

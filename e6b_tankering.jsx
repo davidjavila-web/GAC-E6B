@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.33";
+const APP_VERSION="1.34";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -118,7 +118,47 @@ const ICAO_TZ={
   YSSY:10,YMML:10,NZAA:12
 };
 
-const C={bg:"#f0f2f5",panel:"#1b2a4a",card:"#ffffff",border:"#d8dce3",accent:"#2563eb",gold:"#d97706",green:"#059669",red:"#dc2626",amber:"#d97706",muted:"#7c8494",text:"#0f172a",sub:"#475569",light:"#ffffff",inputBg:"#e8ebf0"};
+// ── Theme palettes ─────────────────────────────────────────────────────────
+// Accent/status colors (accent/green/red/amber/gold) and `light` (text on dark
+// surfaces) are identical in both modes; only the surface/text neutrals change.
+const C_LIGHT={bg:"#f0f2f5",panel:"#1b2a4a",card:"#ffffff",border:"#d8dce3",accent:"#2563eb",gold:"#d97706",green:"#059669",red:"#dc2626",amber:"#d97706",muted:"#7c8494",text:"#0f172a",sub:"#475569",light:"#ffffff",inputBg:"#e8ebf0"};
+const C_DARK={bg:"#0b1220",panel:"#0f1829",card:"#141e30",border:"#1e2d40",accent:"#2563eb",gold:"#d97706",green:"#059669",red:"#dc2626",amber:"#d97706",muted:"#5a7a90",text:"#dce6ee",sub:"#8faabe",light:"#ffffff",inputBg:"#182438"};
+
+// `C` stays a single module-level object referenced everywhere (~770 sites).
+// Instead of reassigning it (which would break the module-level captures like
+// DUTY_LEG_COLORS), we MUTATE its keys in place so every reference sees the
+// active palette. recomputeTheme() is the only writer.
+const C={...C_LIGHT};
+const THEME_KEY="e6b:theme";
+let themeMode="auto"; // "auto" | "light" | "dark"
+try{const raw=localStorage.getItem(THEME_KEY);if(raw){const v=JSON.parse(raw);if(v==="light"||v==="dark"||v==="auto")themeMode=v;}}catch{}
+const themeListeners=new Set();
+function systemPrefersDark(){try{return!!(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);}catch{return false;}}
+function themeIsDark(){return themeMode==="dark"||(themeMode==="auto"&&systemPrefersDark());}
+function recomputeTheme(){
+  Object.assign(C,themeIsDark()?C_DARK:C_LIGHT);
+  try{
+    document.documentElement.style.background=C.bg;
+    document.body.style.background=C.bg;
+    const meta=document.querySelector('meta[name="theme-color"]');
+    if(meta)meta.setAttribute("content",C.panel);
+  }catch{}
+}
+function setThemeMode(mode){themeMode=mode;try{localStorage.setItem(THEME_KEY,JSON.stringify(mode));}catch{}recomputeTheme();themeListeners.forEach(fn=>fn());}
+function cycleThemeMode(){setThemeMode(themeMode==="auto"?"light":themeMode==="light"?"dark":"auto");}
+recomputeTheme();
+try{
+  const mq=window.matchMedia("(prefers-color-scheme: dark)");
+  const onSys=()=>{recomputeTheme();themeListeners.forEach(fn=>fn());};
+  if(mq.addEventListener)mq.addEventListener("change",onSys);else if(mq.addListener)mq.addListener(onSys);
+}catch{}
+// Subscribe a component to theme changes and keep C in sync for its render.
+function useTheme(){
+  const[,force]=useState(0);
+  useEffect(()=>{const fn=()=>force(n=>n+1);themeListeners.add(fn);return()=>themeListeners.delete(fn);},[]);
+  recomputeTheme();
+  return{mode:themeMode,isDark:themeIsDark(),cycle:cycleThemeMode};
+}
 const LEG_COLORS=["#4a7fa5","#5a8f7a","#8a7a5a","#7a5a8a","#4a7a6a","#7a6a4a","#5a6a8a","#8a5a6a"];
 // Rotating accent palette used in the 10/24 tab (manual entry leg cards + explanation panel route cards).
 // Indexed by global leg position; wraps after the 6th leg.
@@ -3463,6 +3503,7 @@ function FlightDutyCalc(){
 // ── Main App ──────────────────────────────────────────────────────────────
 export default function E6B(){
   const wide=useWide();
+  const theme=useTheme();
   const[screen,setScreen]=useState("calc");
   const[currency,setCurrency]=useState(CURRENCIES[0]);
   const[aircraftId,setAircraftId]=useState("gv");
@@ -3647,7 +3688,11 @@ export default function E6B(){
             <div style={{background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",borderRadius:10,width:38,height:38,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⛽</div>
             <div><div style={{fontSize:16,fontWeight:800,letterSpacing:.3,color:C.light}}>E6B</div><div style={{fontSize:10,color:C.light+"99",letterSpacing:.5,marginTop:1}}>FUEL TANKERING MODULE · v{APP_VERSION}</div></div>
           </div>
-          <div style={{display:"flex",gap:wide?8:5}}>
+          <div style={{display:"flex",alignItems:"center",gap:wide?8:5}}>
+            <button onClick={theme.cycle} title={"Theme: "+theme.mode+" (tap to change)"}
+              style={{padding:wide?"7px 11px":"6px 9px",borderRadius:7,border:"1px solid #94a3b833",background:"#94a3b81a",color:"#cbd5e1",fontSize:wide?14:13,fontWeight:700,cursor:"pointer",lineHeight:1,minWidth:wide?40:34,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              {theme.mode==="light"?"☀️":theme.mode==="dark"?"🌙":"Auto"}
+            </button>
             {[{s:"calc",l:"Calc"},{s:"pcn",l:"PCN"},{s:"bke",l:"BKE"},{s:"duty",l:"10/24"},{s:"aircraft",l:"Aircraft"},{s:"history",l:"History"}].map(({s,l})=>(
               <button key={s} onClick={()=>setScreen(s)}
                 style={{padding:wide?"8px 16px":"6px 12px",borderRadius:7,border:"none",background:screen===s?C.accent+"33":"transparent",color:screen===s?"#93c5fd":"#94a3b8",fontSize:wide?14:13,fontWeight:600,cursor:"pointer"}}>{l}</button>
