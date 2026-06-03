@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.36";
+const APP_VERSION="1.37";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2645,8 +2645,8 @@ function FlightDutyCalc(){
   const[startDay,setStartDay]=useState("");
   const[startMonth,setStartMonth]=useState("APR");
   const[startYear,setStartYear]=useState("26");
-  const[dutyOnDef,setDutyOnDef]=useState(60);
-  const[dutyOffDef,setDutyOffDef]=useState(30);
+  const[dutyOnDef,setDutyOnDef]=useState("60");
+  const[dutyOffDef,setDutyOffDef]=useState("30");
   const[customOffsets,setCustomOffsets]=useState({});
   const[result,setResult]=useState(null);
   const[showExplain,setShowExplain]=useState(false);
@@ -3015,11 +3015,11 @@ function FlightDutyCalc(){
     if(!legs[0].date){setParseError("Enter the start date for leg 1.");return;}
     const resolved=resolveLegTimes(legs);
     const periods=groupDutyPeriods(resolved);
-    const analysis=computeDutyAnalysis(periods,crewMode,dutyOnDef,dutyOffDef,customOffsets);
+    const analysis=computeDutyAnalysis(periods,crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets);
     setResult(analysis);
   }
 
-  function handleOffsetChange(pi,field,val){setCustomOffsets(prev=>({...prev,[pi]:{...(prev[pi]||{on:dutyOnDef,off:dutyOffDef}),[field]:Number(val)}}));}
+  function handleOffsetChange(pi,field,val){setCustomOffsets(prev=>({...prev,[pi]:{...(prev[pi]||{on:Number(dutyOnDef)||0,off:Number(dutyOffDef)||0}),[field]:Number(val)}}));}
   function statusColor(s){return s==="red"?C.red:s==="amber"?C.gold:C.green;}
   function statusLabel(s){return s==="red"?"EXCEEDED":s==="amber"?"CAUTION":"OK";}
   function resetAll(){setParsed(null);setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);}
@@ -3240,18 +3240,21 @@ function FlightDutyCalc(){
     <div style={{background:C.card,border:"1px solid "+C.border,borderRadius:12,padding:14,marginBottom:14}}>
       <div style={{fontSize:11,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:.8,marginBottom:10}}>Duty Offsets (defaults)</div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <div>
-          <div style={{fontSize:10,color:C.muted,marginBottom:4}}>Before first leg (min 30)</div>
-          <select value={dutyOnDef} onChange={e=>{setDutyOnDef(Number(e.target.value));if(result)setResult(null);}} style={{width:"100%",background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 10px",color:C.text,fontSize:14,fontWeight:700}}>
-            {[30,45,60,75,90,120].map(v=><option key={v} value={v}>{v} min</option>)}
-          </select>
-        </div>
-        <div>
-          <div style={{fontSize:10,color:C.muted,marginBottom:4}}>After last leg (min 10)</div>
-          <select value={dutyOffDef} onChange={e=>{setDutyOffDef(Number(e.target.value));if(result)setResult(null);}} style={{width:"100%",background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 10px",color:C.text,fontSize:14,fontWeight:700}}>
-            {[10,15,20,30,45,60].map(v=><option key={v} value={v}>{v} min</option>)}
-          </select>
-        </div>
+        {[{label:"Before first leg (min 30)",val:dutyOnDef,set:setDutyOnDef,min:30},
+          {label:"After last leg (min 10)",val:dutyOffDef,set:setDutyOffDef,min:10}].map(({label,val,set,min})=>{
+          const n=Number(val);
+          const below=val!==""&&Number.isFinite(n)&&n<min;
+          return(<div key={label}>
+            <div style={{fontSize:10,color:C.muted,marginBottom:4}}>{label}</div>
+            <div style={{position:"relative"}}>
+              <input type="text" inputMode="numeric" value={val} placeholder={String(min)}
+                onChange={e=>{set(e.target.value.replace(/[^0-9]/g,""));if(result)setResult(null);}}
+                style={{width:"100%",background:C.bg,border:"1.5px solid "+(below?C.amber:C.border),borderRadius:8,padding:"9px 38px 9px 10px",color:C.text,fontSize:14,fontWeight:700,outline:"none",boxSizing:"border-box"}}/>
+              <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",fontSize:11,color:C.muted,pointerEvents:"none"}}>min</span>
+            </div>
+            {below&&<div style={{fontSize:10,color:C.amber,marginTop:3}}>Below {min} min minimum</div>}
+          </div>);
+        })}
       </div>
     </div>
 
