@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.30";
+const APP_VERSION="1.31";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -200,17 +200,21 @@ async function ocrFromDataUrl(dataUrl,onProgress){
   for(let i=0;i<sample.data.length;i+=4)avgBrightness+=(sample.data[i]+sample.data[i+1]+sample.data[i+2])/3;
   avgBrightness/=(sample.data.length/4);
   // If dark bg (< 128), invert for OCR
+  let wasDark=false;
   if(avgBrightness<128){
+    wasDark=true;
     const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
     const d=imageData.data;
     for(let i=0;i<d.length;i+=4){d[i]=255-d[i];d[i+1]=255-d[i+1];d[i+2]=255-d[i+2];}
     ctx.putImageData(imageData,0,0);
   }
-  // Increase contrast
+  // Increase contrast — push harder (2.0) on inverted dark-UI screenshots
+  // (white-on-dark-teal crew schedules) so faint lines aren't dropped.
+  const contrastFactor=wasDark?2.0:1.5;
   const imgData=ctx.getImageData(0,0,canvas.width,canvas.height);
   const dd=imgData.data;
   for(let i=0;i<dd.length;i+=4){
-    for(let c=0;c<3;c++){let v=dd[i+c];v=((v/255-0.5)*1.5+0.5)*255;dd[i+c]=Math.max(0,Math.min(255,v));}
+    for(let c=0;c<3;c++){let v=dd[i+c];v=((v/255-0.5)*contrastFactor+0.5)*255;dd[i+c]=Math.max(0,Math.min(255,v));}
   }
   ctx.putImageData(imgData,0,0);
   const processedUrl=canvas.toDataURL("image/png");
@@ -2339,7 +2343,8 @@ function parseCrewScheduleOcr(text){
   const monthNames=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
   const monthRe=new RegExp("\\b("+monthNames.join("|")+")\\b","i");
   // ICAO sep ICAO — uppercase 4-letter codes joined by an OCR arrow/separator.
-  const routeRe=/\b([A-Z]{4})\b\s*[=»>→➜~+*\-–—]+\s*\b([A-Z]{4})\b/;
+  // The class includes "<" so OCR renderings like "KFLL <=» KMIA" still match.
+  const routeRe=/\b([A-Z]{4})\b\s*[=»<>→➜~+*\-–—]+\s*\b([A-Z]{4})\b/;
   const swapRe=/CREW\s*SWAP/i;
 
   // Garbled time → {h,m,min}. "0543"→05:43, "10450"→1045, "800"→0800.
@@ -2388,7 +2393,14 @@ function parseCrewScheduleOcr(text){
         if(t1&&t2){dep=t1;arr=t2;break;}
       }
     }
-    if(!dep||!arr)continue;
+    if(!dep||!arr){
+      // Route with no times line (e.g. "MTPP =» KMIA" followed directly by crew
+      // initials). Still record the leg so the user can fill times in via Edit.
+      legs.push({origin,dest,depH:null,depM:null,arrH:null,arrM:null,
+        flightMins:null,hasRest:false,restMins:null,needsTimes:true,
+        date:curDate?{...curDate}:null});
+      continue;
+    }
     // If one endpoint's offset is unknown, borrow the other's (common for short
     // domestic legs); if both unknown, treat the times as already canonical (0).
     const oOff=knownOffset(origin),dOff=knownOffset(dest);
@@ -2402,7 +2414,8 @@ function parseCrewScheduleOcr(text){
       flightMins,hasRest:false,restMins:null,date:curDate?{...curDate}:null});
   }
   if(legs.length===0)return null;
-  return{legs,needDate:!legs[0].date};
+  // No date header found anywhere → prompt the user for the start date.
+  return{legs,needDate:!curDate};
 }
 
 function parseDutyTrip(text){
@@ -2481,15 +2494,26 @@ function parseDutyTrip(text){
     legs.push({origin,dest,depH,depM,arrH,arrM,flightMins,hasRest,restMins,date:curDate?{...curDate}:null});
     i=j;
   }
-  if(legs.length===0){
-    // Fallbacks: OCR-aware trip parser, then the crew-schedule (single-column) parser
-    const ocrResult=parseOcrDutyTrip(text);
-    if(ocrResult)return ocrResult;
-    const crewResult=parseCrewScheduleOcr(text);
-    if(crewResult)return crewResult;
-    return null;
-  }
-  return{legs,needDate:!legs[0].date};
+  const standardResult=legs.length>0?{legs,needDate:!legs[0].date}:null;
+
+  // Count "ICAO arrow ICAO" route lines so we know how many legs to expect from
+  // a single-column crew-schedule screenshot. (Standard ARINCDirect pastes spread
+  // a route across multiple lines and won't match here → 0, which is fine.)
+  const routeLineRe=/\b[A-Z]{4}\b\s*[=»<>→➜~+*\-–—]+\s*\b[A-Z]{4}\b/g;
+  const expectedRoutes=(text.match(routeLineRe)||[]).length;
+
+  // If the standard parser already captured every route, trust it.
+  if(standardResult&&expectedRoutes>0&&standardResult.legs.length>=expectedRoutes)
+    return standardResult;
+
+  // Otherwise run every parser and return whichever found the MOST legs. A parser
+  // that matches only 1 of several legs must not win over one that finds them all.
+  // Ties prefer the earlier (more authoritative) parser: standard → ocr → crew.
+  const candidates=[standardResult,parseOcrDutyTrip(text),parseCrewScheduleOcr(text)].filter(Boolean);
+  if(candidates.length===0)return null;
+  let best=candidates[0];
+  for(const c of candidates)if(c.legs.length>best.legs.length)best=c;
+  return best;
 }
 
 function groupDutyPeriods(legs){
@@ -2944,6 +2968,8 @@ function FlightDutyCalc(){
   function runCalc(){
     if(!parsed)return;
     let legs=[...parsed.legs];
+    const missing=legs.findIndex(l=>l.needsTimes||l.depH===null||l.depH===undefined||l.arrH===null||l.arrH===undefined);
+    if(missing>=0){setParseError("Leg "+(missing+1)+" is missing times — tap Edit to enter them.");return;}
     if(needDate&&startDay)legs[0]={...legs[0],date:{day:Number(startDay),month:startMonth,year2:Number(startYear)}};
     if(!legs[0].date){setParseError("Enter the start date for leg 1.");return;}
     const resolved=resolveLegTimes(legs);
@@ -2961,8 +2987,8 @@ function FlightDutyCalc(){
     if(!parsed)return;
     const monthNames=["","JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
     const mLegs=parsed.legs.map(l=>{
-      const depT=String(l.depH).padStart(2,"0")+":"+String(l.depM).padStart(2,"0");
-      const arrT=String(l.arrH).padStart(2,"0")+":"+String(l.arrM).padStart(2,"0");
+      const depT=l.depH===null||l.depH===undefined?"":String(l.depH).padStart(2,"0")+":"+String(l.depM).padStart(2,"0");
+      const arrT=l.arrH===null||l.arrH===undefined?"":String(l.arrH).padStart(2,"0")+":"+String(l.arrM).padStart(2,"0");
       let dateStr="";
       if(l.date){
         const mi=monthNames.indexOf(l.date.month);
@@ -3111,8 +3137,11 @@ function FlightDutyCalc(){
         <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,fontSize:12,flexWrap:"wrap"}}>
           <span style={{color:C.accent,fontWeight:700,minWidth:18}}>L{i+1}</span>
           <span style={{color:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
-          <span style={{color:C.muted}}>{String(leg.depH).padStart(2,"0")}:{String(leg.depM).padStart(2,"0")}–{String(leg.arrH).padStart(2,"0")}:{String(leg.arrM).padStart(2,"0")}</span>
-          <span style={{color:C.gold}}>{fmtHM(leg.flightMins)}</span>
+          {leg.needsTimes
+            ?<span style={{color:C.gold,fontWeight:700}}>??:??–??:??</span>
+            :<><span style={{color:C.muted}}>{String(leg.depH).padStart(2,"0")}:{String(leg.depM).padStart(2,"0")}–{String(leg.arrH).padStart(2,"0")}:{String(leg.arrM).padStart(2,"0")}</span>
+          <span style={{color:C.gold}}>{fmtHM(leg.flightMins)}</span></>}
+          {leg.needsTimes&&<span style={{fontSize:9,background:C.gold+"22",color:C.gold,padding:"2px 6px",borderRadius:4,fontWeight:700}}>TAP EDIT</span>}
           {leg.hasRest&&<span style={{fontSize:9,background:C.green+"22",color:C.green,padding:"2px 6px",borderRadius:4,fontWeight:700}}>REST</span>}
         </div>))}
 
