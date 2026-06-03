@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.34";
+const APP_VERSION="1.35";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3035,7 +3035,10 @@ function FlightDutyCalc(){
         const mi=monthNames.indexOf(l.date.month);
         if(mi>0)dateStr="20"+String(l.date.year2).padStart(2,"0")+"-"+String(mi).padStart(2,"0")+"-"+String(l.date.day).padStart(2,"0");
       }
-      return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,date:dateStr};
+      // Parsed times are canonical UTC, so open the editor in Z (Zulu) mode and
+      // mirror them into the visible input buffers (depInput/arrInput) — the time
+      // fields render those, not depTime/arrTime.
+      return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput:depT,arrInput:arrT,date:dateStr,mode:"Z"};
     });
     setManualLegs(mLegs);
     setDutyInputMode("manual");

@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.34";
+const APP_VERSION = "1.35";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -6786,12 +6786,18 @@ function FlightDutyCalc() {
         const mi = monthNames.indexOf(l.date.month);
         if (mi > 0) dateStr = "20" + String(l.date.year2).padStart(2, "0") + "-" + String(mi).padStart(2, "0") + "-" + String(l.date.day).padStart(2, "0");
       }
+      // Parsed times are canonical UTC, so open the editor in Z (Zulu) mode and
+      // mirror them into the visible input buffers (depInput/arrInput) — the time
+      // fields render those, not depTime/arrTime.
       return {
         origin: l.origin || "",
         dest: l.dest || "",
         depTime: depT,
         arrTime: arrT,
-        date: dateStr
+        depInput: depT,
+        arrInput: arrT,
+        date: dateStr,
+        mode: "Z"
       };
     });
     setManualLegs(mLegs);
