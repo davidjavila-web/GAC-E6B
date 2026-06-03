@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.35";
+const APP_VERSION="1.36";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3687,15 +3687,17 @@ export default function E6B(){
       {/* Header */}
       <div style={{background:C.panel,borderBottom:"1px solid #0f172a55",padding:wide?"13px 24px":"13px 16px",position:"sticky",top:0,zIndex:10}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
             <div style={{background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",borderRadius:10,width:38,height:38,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>⛽</div>
             <div><div style={{fontSize:16,fontWeight:800,letterSpacing:.3,color:C.light}}>E6B</div><div style={{fontSize:10,color:C.light+"99",letterSpacing:.5,marginTop:1}}>FUEL TANKERING MODULE · v{APP_VERSION}</div></div>
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:wide?8:5}}>
+            {/* Theme override toggle: Auto → Light → Dark → Auto. Anchored next to
+                the title so it can't be clipped by the nav-tab row on mobile. */}
             <button onClick={theme.cycle} title={"Theme: "+theme.mode+" (tap to change)"}
-              style={{padding:wide?"7px 11px":"6px 9px",borderRadius:7,border:"1px solid #94a3b833",background:"#94a3b81a",color:"#cbd5e1",fontSize:wide?14:13,fontWeight:700,cursor:"pointer",lineHeight:1,minWidth:wide?40:34,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              style={{padding:wide?"7px 11px":"6px 9px",borderRadius:999,border:"1px solid #94a3b844",background:"#94a3b81a",color:"#cbd5e1",fontSize:wide?14:13,fontWeight:700,cursor:"pointer",lineHeight:1,minWidth:wide?42:36,height:wide?34:30,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
               {theme.mode==="light"?"☀️":theme.mode==="dark"?"🌙":"Auto"}
             </button>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:wide?8:5}}>
             {[{s:"calc",l:"Calc"},{s:"pcn",l:"PCN"},{s:"bke",l:"BKE"},{s:"duty",l:"10/24"},{s:"aircraft",l:"Aircraft"},{s:"history",l:"History"}].map(({s,l})=>(
               <button key={s} onClick={()=>setScreen(s)}
                 style={{padding:wide?"8px 16px":"6px 12px",borderRadius:7,border:"none",background:screen===s?C.accent+"33":"transparent",color:screen===s?"#93c5fd":"#94a3b8",fontSize:wide?14:13,fontWeight:600,cursor:"pointer"}}>{l}</button>

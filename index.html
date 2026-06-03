@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.35";
+const APP_VERSION = "1.36";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -9110,7 +9110,8 @@ function E6B() {
     style: {
       display: "flex",
       alignItems: "center",
-      gap: 10
+      gap: 10,
+      flexShrink: 0
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -9138,31 +9139,33 @@ function E6B() {
       letterSpacing: .5,
       marginTop: 1
     }
-  }, "FUEL TANKERING MODULE \xB7 v", APP_VERSION))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: wide ? 8 : 5
-    }
-  }, /*#__PURE__*/React.createElement("button", {
+  }, "FUEL TANKERING MODULE \xB7 v", APP_VERSION)), /*#__PURE__*/React.createElement("button", {
     onClick: theme.cycle,
     title: "Theme: " + theme.mode + " (tap to change)",
     style: {
       padding: wide ? "7px 11px" : "6px 9px",
-      borderRadius: 7,
-      border: "1px solid #94a3b833",
+      borderRadius: 999,
+      border: "1px solid #94a3b844",
       background: "#94a3b81a",
       color: "#cbd5e1",
       fontSize: wide ? 14 : 13,
       fontWeight: 700,
       cursor: "pointer",
       lineHeight: 1,
-      minWidth: wide ? 40 : 34,
+      minWidth: wide ? 42 : 36,
+      height: wide ? 34 : 30,
       display: "flex",
       alignItems: "center",
-      justifyContent: "center"
+      justifyContent: "center",
+      flexShrink: 0
     }
-  }, theme.mode === "light" ? "☀️" : theme.mode === "dark" ? "🌙" : "Auto"), [{
+  }, theme.mode === "light" ? "☀️" : theme.mode === "dark" ? "🌙" : "Auto")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: wide ? 8 : 5
+    }
+  }, [{
     s: "calc",
     l: "Calc"
   }, {
