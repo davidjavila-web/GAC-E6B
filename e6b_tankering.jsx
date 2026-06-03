@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.32";
+const APP_VERSION="1.33";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3650,7 +3650,7 @@ export default function E6B(){
           <div style={{display:"flex",gap:wide?8:5}}>
             {[{s:"calc",l:"Calc"},{s:"pcn",l:"PCN"},{s:"bke",l:"BKE"},{s:"duty",l:"10/24"},{s:"aircraft",l:"Aircraft"},{s:"history",l:"History"}].map(({s,l})=>(
               <button key={s} onClick={()=>setScreen(s)}
-                style={{padding:wide?"8px 16px":"6px 12px",borderRadius:7,border:"none",background:screen===s?C.accent+"33":"transparent",color:screen===s?"#93c5fd":"#94a3b855",fontSize:wide?13:12,fontWeight:600,cursor:"pointer"}}>{l}</button>
+                style={{padding:wide?"8px 16px":"6px 12px",borderRadius:7,border:"none",background:screen===s?C.accent+"33":"transparent",color:screen===s?"#93c5fd":"#94a3b8",fontSize:wide?14:13,fontWeight:600,cursor:"pointer"}}>{l}</button>
             ))}
           </div>
         </div>
