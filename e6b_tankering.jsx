@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.31";
+const APP_VERSION="1.32";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2343,8 +2343,9 @@ function parseCrewScheduleOcr(text){
   const monthNames=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
   const monthRe=new RegExp("\\b("+monthNames.join("|")+")\\b","i");
   // ICAO sep ICAO — uppercase 4-letter codes joined by an OCR arrow/separator.
-  // The class includes "<" so OCR renderings like "KFLL <=» KMIA" still match.
-  const routeRe=/\b([A-Z]{4})\b\s*[=»<>→➜~+*\-–—]+\s*\b([A-Z]{4})\b/;
+  // OCR mangles the arrow into many forms: =» <=» «= «=» = > → etc., so the
+  // class accepts any run of guillemets/angle-brackets/arrows/dashes/etc.
+  const routeRe=/\b([A-Z]{4})\b\s*[=»«<>→➜➝+*\-–—~]+\s*\b([A-Z]{4})\b/;
   const swapRe=/CREW\s*SWAP/i;
 
   // Garbled time → {h,m,min}. "0543"→05:43, "10450"→1045, "800"→0800.
@@ -2499,7 +2500,7 @@ function parseDutyTrip(text){
   // Count "ICAO arrow ICAO" route lines so we know how many legs to expect from
   // a single-column crew-schedule screenshot. (Standard ARINCDirect pastes spread
   // a route across multiple lines and won't match here → 0, which is fine.)
-  const routeLineRe=/\b[A-Z]{4}\b\s*[=»<>→➜~+*\-–—]+\s*\b[A-Z]{4}\b/g;
+  const routeLineRe=/\b[A-Z]{4}\b\s*[=»«<>→➜➝+*\-–—~]+\s*\b[A-Z]{4}\b/g;
   const expectedRoutes=(text.match(routeLineRe)||[]).length;
 
   // If the standard parser already captured every route, trust it.
