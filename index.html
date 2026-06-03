@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.27";
+const APP_VERSION = "1.28";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -340,6 +340,40 @@ function useWide(bp = 768) {
     return () => window.removeEventListener("resize", check);
   }, [bp]);
   return wide;
+}
+
+// True when the device likely has a physical keyboard / precise pointer —
+// covers desktops AND iPads with an attached keyboard, where the custom
+// numpad should yield to direct keyboard typing.
+function detectHasKeyboard() {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.innerWidth >= 768 || window.matchMedia && window.matchMedia("(pointer: fine)").matches || window.matchMedia && window.matchMedia("(hover: hover)").matches;
+  } catch (e) {
+    return window.innerWidth >= 768;
+  }
+}
+function useHasKeyboard() {
+  const [has, setHas] = useState(detectHasKeyboard);
+  useEffect(() => {
+    const check = () => setHas(detectHasKeyboard());
+    window.addEventListener("resize", check);
+    const mqs = [];
+    try {
+      ["(pointer: fine)", "(hover: hover)"].forEach(q => {
+        const m = window.matchMedia(q);
+        if (m.addEventListener) m.addEventListener("change", check);else if (m.addListener) m.addListener(check);
+        mqs.push(m);
+      });
+    } catch (e) {}
+    return () => {
+      window.removeEventListener("resize", check);
+      mqs.forEach(m => {
+        if (m.removeEventListener) m.removeEventListener("change", check);else if (m.removeListener) m.removeListener(check);
+      });
+    };
+  }, []);
+  return has;
 }
 
 // ── Global Tesseract OCR ─────────────────────────────────────────────────
@@ -1214,7 +1248,7 @@ function Field({
   legContext
 }) {
   const [showPad, setShowPad] = useState(false);
-  const wide = useWide();
+  const hasKb = useHasKeyboard();
   const lc = color || C.accent;
   useEffect(() => {
     if (!fieldId) return;
@@ -1241,11 +1275,12 @@ function Field({
     style: {
       position: "relative"
     }
-  }, wide ? /*#__PURE__*/React.createElement("input", {
+  }, hasKb ? /*#__PURE__*/React.createElement("input", {
     type: "text",
     inputMode: "decimal",
     value: value,
     onChange: e => onChange(e.target.value),
+    onFocus: e => e.target.select(),
     onKeyDown: e => {
       if (e.key === "Enter" && onNext) {
         e.preventDefault();
@@ -1279,7 +1314,7 @@ function Field({
       boxSizing: "border-box",
       cursor: "pointer"
     }
-  }), !wide && showPad && /*#__PURE__*/React.createElement(NumPadOverlay, {
+  }), !hasKb && showPad && /*#__PURE__*/React.createElement(NumPadOverlay, {
     onClose: () => setShowPad(false)
   }, /*#__PURE__*/React.createElement(NumPad, {
     value: value,
@@ -8611,7 +8646,8 @@ function E6B() {
   // FOB input with numpad
   function FobField() {
     const [showPad, setShowPad] = useState(false);
-    if (wide) return /*#__PURE__*/React.createElement("div", {
+    const hasKb = useHasKeyboard();
+    if (hasKb) return /*#__PURE__*/React.createElement("div", {
       style: {
         position: "relative"
       }
@@ -8620,6 +8656,7 @@ function E6B() {
       inputMode: "decimal",
       value: initialFob,
       onChange: e => setInitialFob(e.target.value),
+      onFocus: e => e.target.select(),
       style: {
         width: "100%",
         background: C.inputBg,

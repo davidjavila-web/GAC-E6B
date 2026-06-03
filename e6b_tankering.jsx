@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.27";
+const APP_VERSION="1.28";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -138,6 +138,39 @@ function useWide(bp=768){
     window.addEventListener("resize",check);return()=>window.removeEventListener("resize",check);
   },[bp]);
   return wide;
+}
+
+// True when the device likely has a physical keyboard / precise pointer —
+// covers desktops AND iPads with an attached keyboard, where the custom
+// numpad should yield to direct keyboard typing.
+function detectHasKeyboard(){
+  if(typeof window==="undefined")return false;
+  try{
+    return window.innerWidth>=768
+      ||(window.matchMedia&&window.matchMedia("(pointer: fine)").matches)
+      ||(window.matchMedia&&window.matchMedia("(hover: hover)").matches);
+  }catch(e){return window.innerWidth>=768;}
+}
+function useHasKeyboard(){
+  const[has,setHas]=useState(detectHasKeyboard);
+  useEffect(()=>{
+    const check=()=>setHas(detectHasKeyboard());
+    window.addEventListener("resize",check);
+    const mqs=[];
+    try{
+      ["(pointer: fine)","(hover: hover)"].forEach(q=>{
+        const m=window.matchMedia(q);
+        if(m.addEventListener)m.addEventListener("change",check);
+        else if(m.addListener)m.addListener(check);
+        mqs.push(m);
+      });
+    }catch(e){}
+    return()=>{
+      window.removeEventListener("resize",check);
+      mqs.forEach(m=>{if(m.removeEventListener)m.removeEventListener("change",check);else if(m.removeListener)m.removeListener(check);});
+    };
+  },[]);
+  return has;
 }
 
 // ── Global Tesseract OCR ─────────────────────────────────────────────────
@@ -587,7 +620,7 @@ function NumPadOverlay({children,onClose}){
 // window.__e6b is a registry of open functions keyed by fieldId
 function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext}){
   const[showPad,setShowPad]=useState(false);
-  const wide=useWide();
+  const hasKb=useHasKeyboard();
   const lc=color||C.accent;
   useEffect(()=>{
     if(!fieldId)return;
@@ -599,16 +632,17 @@ function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext
     <div style={{marginBottom:0}}>
       <div style={{fontSize:11,fontWeight:600,color:lc,textTransform:"uppercase",letterSpacing:.8,marginBottom:5}}>{label}</div>
       <div style={{position:"relative"}}>
-        {wide
+        {hasKb
           ?<input type="text" inputMode="decimal" value={value}
              onChange={e=>onChange(e.target.value)}
+             onFocus={e=>e.target.select()}
              onKeyDown={e=>{if(e.key==="Enter"&&onNext){e.preventDefault();onNext();}}}
              style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
                padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
           :<input readOnly value={value} onClick={()=>setShowPad(true)}
              style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
                padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box",cursor:"pointer"}}/>}
-        {!wide&&showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
+        {!hasKb&&showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
           <NumPad value={value} label={label} step={step||"any"}
             onChange={v=>{onChange(v);setShowPad(false);}}
             onClose={()=>setShowPad(false)}
@@ -3444,8 +3478,10 @@ export default function E6B(){
   // FOB input with numpad
   function FobField(){
     const[showPad,setShowPad]=useState(false);
-    if(wide)return(<div style={{position:"relative"}}>
+    const hasKb=useHasKeyboard();
+    if(hasKb)return(<div style={{position:"relative"}}>
       <input type="text" inputMode="decimal" value={initialFob} onChange={e=>setInitialFob(e.target.value)}
+        onFocus={e=>e.target.select()}
         style={{width:"100%",background:C.inputBg,border:"1.5px solid "+C.accent+"55",borderRadius:8,padding:"11px 14px",color:C.text,fontSize:16,fontWeight:700,outline:"none",boxSizing:"border-box"}}/>
     </div>);
     return(<div style={{position:"relative"}}>
