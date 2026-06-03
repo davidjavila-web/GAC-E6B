@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.28";
+const APP_VERSION="1.29";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -622,6 +622,13 @@ function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext
   const[showPad,setShowPad]=useState(false);
   const hasKb=useHasKeyboard();
   const lc=color||C.accent;
+  // Local buffer for keyboard typing — only synced to the parent on blur/Enter.
+  // Without this, every keystroke updates parent state, the leg re-renders, and
+  // the input loses focus after a single digit.
+  const[local,setLocal]=useState(value);
+  const focusedRef=useRef(false);
+  useEffect(()=>{if(!focusedRef.current)setLocal(value);},[value]);
+  const commit=()=>{focusedRef.current=false;if(local!==value)onChange(local);};
   useEffect(()=>{
     if(!fieldId)return;
     window.__e6b=window.__e6b||{};
@@ -633,18 +640,24 @@ function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext
       <div style={{fontSize:11,fontWeight:600,color:lc,textTransform:"uppercase",letterSpacing:.8,marginBottom:5}}>{label}</div>
       <div style={{position:"relative"}}>
         {hasKb
-          ?<input type="text" inputMode="decimal" value={value}
-             onChange={e=>onChange(e.target.value)}
-             onFocus={e=>e.target.select()}
-             onKeyDown={e=>{if(e.key==="Enter"&&onNext){e.preventDefault();onNext();}}}
+          ?<input type="text" inputMode="decimal" value={local}
+             onChange={e=>setLocal(e.target.value)}
+             onFocus={e=>{focusedRef.current=true;e.target.select();}}
+             onBlur={commit}
+             onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();commit();e.target.blur();if(onNext)onNext();}}}
              style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
-               padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
+               padding:"10px 40px 10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
           :<input readOnly value={value} onClick={()=>setShowPad(true)}
              style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
                padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box",cursor:"pointer"}}/>}
-        {!hasKb&&showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
+        {hasKb&&<button type="button" onMouseDown={e=>e.preventDefault()} onClick={()=>setShowPad(true)}
+          title="Open numpad"
+          style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",
+            background:lc+"1a",border:"1px solid "+lc+"44",borderRadius:6,padding:"4px 6px",
+            fontSize:14,lineHeight:1,cursor:"pointer",color:lc}}>🔢</button>}
+        {showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
           <NumPad value={value} label={label} step={step||"any"}
-            onChange={v=>{onChange(v);setShowPad(false);}}
+            onChange={v=>{setLocal(v);onChange(v);setShowPad(false);}}
             onClose={()=>setShowPad(false)}
             onNext={onNext}
             legNum={legNum} legContext={legContext} legColor={lc}/>
@@ -3479,10 +3492,24 @@ export default function E6B(){
   function FobField(){
     const[showPad,setShowPad]=useState(false);
     const hasKb=useHasKeyboard();
+    const[local,setLocal]=useState(initialFob);
+    const focusedRef=useRef(false);
+    useEffect(()=>{if(!focusedRef.current)setLocal(initialFob);},[initialFob]);
+    const commit=()=>{focusedRef.current=false;if(local!==initialFob)setInitialFob(local);};
     if(hasKb)return(<div style={{position:"relative"}}>
-      <input type="text" inputMode="decimal" value={initialFob} onChange={e=>setInitialFob(e.target.value)}
-        onFocus={e=>e.target.select()}
-        style={{width:"100%",background:C.inputBg,border:"1.5px solid "+C.accent+"55",borderRadius:8,padding:"11px 14px",color:C.text,fontSize:16,fontWeight:700,outline:"none",boxSizing:"border-box"}}/>
+      <input type="text" inputMode="decimal" value={local}
+        onChange={e=>setLocal(e.target.value)}
+        onFocus={e=>{focusedRef.current=true;e.target.select();}}
+        onBlur={commit}
+        onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();commit();e.target.blur();}}}
+        style={{width:"100%",background:C.inputBg,border:"1.5px solid "+C.accent+"55",borderRadius:8,padding:"11px 40px 11px 14px",color:C.text,fontSize:16,fontWeight:700,outline:"none",boxSizing:"border-box"}}/>
+      <button type="button" onMouseDown={e=>e.preventDefault()} onClick={()=>setShowPad(true)} title="Open numpad"
+        style={{position:"absolute",right:7,top:"50%",transform:"translateY(-50%)",background:C.accent+"1a",border:"1px solid "+C.accent+"44",borderRadius:6,padding:"4px 6px",fontSize:14,lineHeight:1,cursor:"pointer",color:C.accent}}>🔢</button>
+      {showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
+        <NumPad value={initialFob} label="Fuel On Board (lbs)" step="100"
+          onChange={v=>{setLocal(v);setInitialFob(v);setShowPad(false);}}
+          onClose={()=>setShowPad(false)}/>
+      </NumPadOverlay>}
     </div>);
     return(<div style={{position:"relative"}}>
       <input readOnly value={initialFob} onClick={()=>setShowPad(true)}
