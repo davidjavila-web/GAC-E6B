@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.29";
+const APP_VERSION = "1.30";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -195,6 +195,7 @@ const ICAO_TZ = {
   KPBI: -4,
   KMCO: -4,
   KTPA: -4,
+  KRSW: -4,
   KPHL: -4,
   KDCA: -4,
   KBWI: -4,
@@ -5639,6 +5640,130 @@ function parseOcrDutyTrip(text) {
     needDate: !legs[0].date
   };
 }
+
+// Parser for ARINCDirect crew-schedule screenshots (single day, single column).
+// Unlike the trip parsers, here the route and its two times sit on SEPARATE
+// lines, and the times are LOCAL — they are converted to UTC via ICAO_TZ
+// (departure uses the origin offset, arrival uses the destination offset) so
+// they share the canonical timeline the rest of the duty math expects.
+//   TRIP #10969
+//   KFLL =» KMIA
+//   0543L (3 0800L      ← dep 0543L, garbled status, arr 0800L
+//   MK / WM / RC
+function parseCrewScheduleOcr(text) {
+  const cleaned = text.replace(/[""]/g, '"').replace(/['']/g, "'").replace(/\|/g, "l");
+  const lines = cleaned.split(/\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return null;
+  const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const monthRe = new RegExp("\\b(" + monthNames.join("|") + ")\\b", "i");
+  // ICAO sep ICAO — uppercase 4-letter codes joined by an OCR arrow/separator.
+  const routeRe = /\b([A-Z]{4})\b\s*[=»>→➜~+*\-–—]+\s*\b([A-Z]{4})\b/;
+  const swapRe = /CREW\s*SWAP/i;
+
+  // Garbled time → {h,m,min}. "0543"→05:43, "10450"→1045, "800"→0800.
+  function toTime(tok) {
+    let s = tok.replace(/\D/g, "");
+    if (s.length >= 4) s = s.slice(0, 4); // strip trailing OCR junk: 5+ digits → first 4
+    else if (s.length === 3) s = "0" + s; // HMM → 0HMM
+    else return null;
+    const h = Number(s.slice(0, 2)),
+      m = Number(s.slice(2, 4));
+    if (!Number.isFinite(h) || !Number.isFinite(m) || h > 23 || m > 59) return null;
+    return {
+      h,
+      m,
+      min: h * 60 + m
+    };
+  }
+  // Known offset or undefined. Don't default to 0 here — a missing destination
+  // offset paired with a known departure offset would otherwise wrap the flight
+  // across midnight into an absurd duration.
+  function knownOffset(icao) {
+    const o = ICAO_TZ[icao];
+    return o === undefined || o === null || isNaN(o) ? undefined : Number(o);
+  }
+  const toUtc = (min, off) => ((min - off * 60) % 1440 + 1440) % 1440;
+
+  // Date: month name + a nearby day number (no year in this layout).
+  let curDate = null;
+  for (let i = 0; i < lines.length && !curDate; i++) {
+    const mm = lines[i].match(monthRe);
+    if (!mm) continue;
+    const month = mm[1].toUpperCase();
+    for (let dd = i; dd <= Math.min(i + 1, lines.length - 1) && !curDate; dd++) {
+      const nums = lines[dd].replace(monthRe, "").match(/\b\d{1,2}\b/g);
+      if (nums) for (const n of nums) {
+        const nv = Number(n);
+        if (nv >= 1 && nv <= 31) {
+          curDate = {
+            day: nv,
+            month,
+            year2: 25
+          };
+          break;
+        }
+      }
+    }
+  }
+  const legs = [];
+  for (let i = 0; i < lines.length; i++) {
+    // CREW SWAP closes the preceding leg's duty period (rest boundary).
+    if (swapRe.test(lines[i])) {
+      if (legs.length) legs[legs.length - 1].hasRest = true;
+      continue;
+    }
+    const rm = lines[i].match(routeRe);
+    if (!rm) continue;
+    const origin = rm[1].toUpperCase(),
+      dest = rm[2].toUpperCase();
+    // The two times sit on a following line — look ahead a few lines until the
+    // next route/swap, picking the first line carrying two digit groups.
+    let dep = null,
+      arr = null;
+    for (let j = i + 1; j <= Math.min(i + 3, lines.length - 1); j++) {
+      if (routeRe.test(lines[j]) || swapRe.test(lines[j])) break;
+      const toks = lines[j].match(/\d{3,6}/g);
+      if (toks && toks.length >= 2) {
+        const t1 = toTime(toks[0]),
+          t2 = toTime(toks[1]);
+        if (t1 && t2) {
+          dep = t1;
+          arr = t2;
+          break;
+        }
+      }
+    }
+    if (!dep || !arr) continue;
+    // If one endpoint's offset is unknown, borrow the other's (common for short
+    // domestic legs); if both unknown, treat the times as already canonical (0).
+    const oOff = knownOffset(origin),
+      dOff = knownOffset(dest);
+    const depOff = oOff !== undefined ? oOff : dOff !== undefined ? dOff : 0;
+    const arrOff = dOff !== undefined ? dOff : oOff !== undefined ? oOff : 0;
+    const depMin = toUtc(dep.min, depOff),
+      arrMin = toUtc(arr.min, arrOff);
+    const flightMins = ((arrMin - depMin) % 1440 + 1440) % 1440;
+    legs.push({
+      origin,
+      dest,
+      depH: Math.floor(depMin / 60),
+      depM: depMin % 60,
+      arrH: Math.floor(arrMin / 60),
+      arrM: arrMin % 60,
+      flightMins,
+      hasRest: false,
+      restMins: null,
+      date: curDate ? {
+        ...curDate
+      } : null
+    });
+  }
+  if (legs.length === 0) return null;
+  return {
+    legs,
+    needDate: !legs[0].date
+  };
+}
 function parseDutyTrip(text) {
   const raw = text.split(/\n/).map(l => l.trim());
   const lines = raw.filter(Boolean);
@@ -5777,9 +5902,11 @@ function parseDutyTrip(text) {
     i = j;
   }
   if (legs.length === 0) {
-    // Try OCR-aware parser as fallback
+    // Fallbacks: OCR-aware trip parser, then the crew-schedule (single-column) parser
     const ocrResult = parseOcrDutyTrip(text);
     if (ocrResult) return ocrResult;
+    const crewResult = parseCrewScheduleOcr(text);
+    if (crewResult) return crewResult;
     return null;
   }
   return {
