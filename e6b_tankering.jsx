@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.38";
+const APP_VERSION="1.39";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -584,6 +584,123 @@ function parseTripText(text){
   }
   flDist.forEach((b,idx)=>{if(legs[idx]){legs[idx].cruiseAltFt=b.fl;legs[idx].distNm=b.dist;}});
   return legs;
+}
+
+// ── PDF helpers (pdf.js, CDN-loaded on demand) ─────────────────────────────
+let _pdfLoading=false;
+function loadPdfJs(){
+  return new Promise((resolve,reject)=>{
+    if(window.pdfjsLib){resolve(true);return;}
+    const ready=()=>{
+      if(window.pdfjsLib){
+        try{window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";}catch{}
+        resolve(true);
+      }else reject(new Error("pdf.js failed to load"));
+    };
+    const existing=[...document.scripts].find(s=>s.src&&s.src.includes("pdf.min.js"));
+    if(existing){if(window.pdfjsLib){ready();return;}existing.addEventListener("load",ready);existing.addEventListener("error",()=>reject(new Error("pdf.js failed to load")));return;}
+    if(_pdfLoading){const iv=setInterval(()=>{if(window.pdfjsLib){clearInterval(iv);ready();}},150);setTimeout(()=>clearInterval(iv),15000);return;}
+    _pdfLoading=true;
+    const s=document.createElement("script");
+    s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload=()=>{_pdfLoading=false;ready();};
+    s.onerror=()=>{_pdfLoading=false;reject(new Error("pdf.js failed to load"));};
+    document.head.appendChild(s);
+  });
+}
+// Extract text from every page, reconstructing lines by Y position, then
+// concatenate all pages (multi-page trip sheets) into one string.
+async function extractPdfText(file){
+  await loadPdfJs();
+  const buf=await file.arrayBuffer();
+  const pdf=await window.pdfjsLib.getDocument({data:buf}).promise;
+  let allText="";
+  for(let i=1;i<=pdf.numPages;i++){
+    const page=await pdf.getPage(i);
+    const content=await page.getTextContent();
+    const items=content.items.filter(it=>it.str.trim());
+    if(items.length===0)continue;
+    items.sort((a,b)=>{const dy=b.transform[5]-a.transform[5];if(Math.abs(dy)>3)return dy;return a.transform[4]-b.transform[4];});
+    let lastY=null;
+    for(const item of items){
+      const y=Math.round(item.transform[5]);
+      if(lastY!==null&&Math.abs(y-lastY)>3)allText+="\n";else if(lastY!==null)allText+=" ";
+      allText+=item.str;lastY=y;
+    }
+    allText+="\n";
+  }
+  return allText;
+}
+
+// ── GAC Flight Release trip-sheet parser ───────────────────────────────────
+// Reads dispatch PDFs (FlightBridge/GAC). Pulls per-leg route + distance + burn
+// from the "LEG x of y" detail sections, and per-airport fuel pricing from the
+// page-3 fuel-note blocks (separated by //// lines). Prices in the PDF are per
+// GALLON and converted to per-LB (÷ LBS_PER_GAL). Returns null if unrecognized.
+function parseTripSheetPDF(text){
+  if(!text)return null;
+  const tripMatch=text.match(/Trip\s*#:?\s*(\d+)/i);
+  const tripNum=tripMatch?tripMatch[1]:null;
+
+  // Authoritative ordered airport list from the "Summary:" line, when present.
+  const sumMatch=text.match(/Summary:\s*([A-Z]{4}(?:\s*,\s*[A-Z]{4})*)/);
+  const summaryList=sumMatch?sumMatch[1].split(/[,\s]+/).filter(Boolean):[];
+  const summarySet=new Set(summaryList);
+
+  // Fuel notes (page 3): blocks delimited by //// lines.
+  const fuelNotes={};
+  text.split(/\/{3,}/).forEach(block=>{
+    const ic=block.match(/ICAO:\s*([A-Z]{4})/i);
+    if(!ic)return;
+    const icao=ic[1].toUpperCase();
+    const pr=block.match(/Quoted Price:\s*\$?\s*(\d+(?:\.\d+)?)/i);
+    const rf=block.match(/Ramp Fee:\s*\$?\s*([\d,]+(?:\.\d+)?)/i);
+    const wv=block.match(/Waived:\s*([\d,]+)\s*Gallon/i);
+    fuelNotes[icao]={
+      pricePerGal:pr?Number(pr[1]):null,
+      rampFee:rf?Number(rf[1].replace(/,/g,"")):null,
+      waivedGal:wv?Number(wv[1].replace(/,/g,"")):null,
+    };
+  });
+
+  // Leg detail blocks (page 2): split on "LEG x of y" markers.
+  function icaoPair(block){
+    const re=/\b([A-Z]{4})\b/g;let m;const found=[];
+    while((m=re.exec(block))){
+      const code=m[1];
+      if(summarySet.size===0||summarySet.has(code))found.push(code);
+      if(found.length>=2)break;
+    }
+    return found.length>=2?[found[0],found[1]]:[found[0]||null,null];
+  }
+  const legParts=text.split(/LEG\s+\d+\s+of\s+\d+/i).slice(1);
+  let legs=legParts.map(block=>{
+    const[from,to]=icaoPair(block);
+    const dm=block.match(/Distance:\s*([\d,]+)\s*nm/i);
+    const bm=block.match(/Fuel\s*Burn:\s*([\d,]+)\s*lbs/i);
+    return{from,to,
+      distNm:dm?Number(dm[1].replace(/,/g,"")):null,
+      plannedBurnLbs:bm?Number(bm[1].replace(/,/g,"")):null};
+  });
+  // Fallback: derive routing from the Summary order if leg blocks gave no ICAOs.
+  if((legs.length===0||legs.every(l=>!l.from))&&summaryList.length>=2){
+    legs=[];
+    for(let i=0;i<summaryList.length-1;i++)legs.push({from:summaryList[i],to:summaryList[i+1],distNm:null,plannedBurnLbs:null});
+  }
+  if(legs.length===0)return null;
+
+  // Attach fuel pricing per leg. Departure airport's note drives dep price,
+  // ramp fee and waiver; arrival airport's note drives arr price.
+  const toPerLb=g=>g==null?"":String((g/LBS_PER_GAL).toFixed(4));
+  legs.forEach(l=>{
+    const dn=l.from?fuelNotes[l.from]:null;
+    const an=l.to?fuelNotes[l.to]:null;
+    l.depPrice=dn&&dn.pricePerGal!=null?toPerLb(dn.pricePerGal):"";
+    l.arrPrice=an&&an.pricePerGal!=null?toPerLb(an.pricePerGal):"";
+    l.depRampFee=dn&&dn.rampFee!=null?String(dn.rampFee):"";
+    l.depMinPurchase=dn&&dn.waivedGal!=null?String(dn.waivedGal):"";
+  });
+  return{tripNum,legs,fuelNotes};
 }
 
 // ── Brief builder ─────────────────────────────────────────────────────────
@@ -3530,6 +3647,7 @@ export default function E6B(){
   const[showMath,setShowMath]=useState(false);
   const priceMemory=useRef({});
   const imgRef=useRef();
+  const pdfRef=useRef();
 
   useEffect(()=>{(async()=>{
     const h=await recall("e6b:hist");if(h)setHistory(h);
@@ -3640,6 +3758,36 @@ export default function E6B(){
     }catch(err){setImportMsg("❌ "+err.message.slice(0,50));setTimeout(()=>setImportMsg(""),5000);}
   }
 
+  async function handleTripSheetPdf(e){
+    const file=e.target.files[0];if(!file)return;
+    e.target.value="";setImporting(true);setImportMsg("Reading trip sheet PDF...");
+    try{
+      const text=await extractPdfText(file);
+      if(!text||!text.trim()){setImportMsg("❌ No text found in PDF");setTimeout(()=>setImportMsg(""),6000);setImporting(false);return;}
+      setImportMsg("Parsing trip sheet...");
+      const parsed=parseTripSheetPDF(text);
+      if(parsed&&parsed.legs&&parsed.legs.length>0){
+        const newLegs=parsed.legs.map(p=>({...newLeg(p.from||""),
+          from:p.from||"",to:p.to||"",
+          distNm:p.distNm?String(p.distNm):"",
+          plannedBurnLbs:p.plannedBurnLbs?String(p.plannedBurnLbs):"",
+          depPrice:p.depPrice||"",arrPrice:p.arrPrice||"",
+          depRampFee:p.depRampFee||"",depMinPurchase:p.depMinPurchase||""}));
+        for(let pi=1;pi<newLegs.length;pi++)newLegs[pi].from=newLegs[pi-1].to;
+        setLegs(newLegs);setCalculated(false);calcRef.current=false;
+        const route=newLegs.map(l=>l.from).concat(newLegs[newLegs.length-1].to).join(" → ");
+        const tripLabel=parsed.tripNum?"Trip #"+parsed.tripNum+": ":"";
+        const n=newLegs.length;
+        setImportMsg("✅ "+tripLabel+route+" — "+n+" leg"+(n>1?"s":"")+" imported with fuel prices");
+        setTimeout(()=>setImportMsg(""),7000);
+      }else{
+        setImportMsg("❌ Couldn't read trip-sheet format — try Paste or Photo");
+        setTimeout(()=>setImportMsg(""),7000);
+      }
+    }catch(err){setImportMsg("❌ PDF error: "+(err.message||"").slice(0,60));setTimeout(()=>setImportMsg(""),8000);}
+    setImporting(false);
+  }
+
   async function saveProfile(p){
     const np=p.id&&profiles.find(x=>x.id===p.id)?profiles.map(x=>x.id===p.id?p:x):[...profiles,{...p,id:"ac_"+Date.now()}];
     setProfiles(np);await store("e6b:profiles",np);setEditingAc(null);
@@ -3686,6 +3834,7 @@ export default function E6B(){
   return(<>
     <div style={{background:C.bg,minHeight:"100vh",fontFamily:"-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sans-serif",color:C.text,maxWidth:wide?960:640,margin:"0 auto"}}>
       <input ref={imgRef} type="file" accept="image/png,image/jpeg,image/jpg,image/heic,image/heif,image/webp,image/*" style={{display:"none"}} onChange={handleImageImport}/>
+      <input ref={pdfRef} type="file" accept=".pdf,application/pdf" style={{display:"none"}} onChange={handleTripSheetPdf}/>
 
       {/* Header */}
       <div style={{background:C.panel,borderBottom:"1px solid #0f172a55",padding:wide?"13px 24px":"13px 16px",position:"sticky",top:0,zIndex:10}}>
@@ -3715,13 +3864,19 @@ export default function E6B(){
           <div style={{background:C.card,border:"1px solid "+C.accent+"44",borderRadius:12,padding:14,marginBottom:14}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
               <div>
-                <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:3}}>📸 Import from Flight Plan Photo</div>
-                <div style={{fontSize:12,color:C.muted}}>Take a screenshot of your trip sheet — AI reads the legs</div>
+                <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:3}}>📄 Import Trip Sheet</div>
+                <div style={{fontSize:12,color:C.muted}}>Upload a GAC Flight Release PDF, or screenshot a flight plan</div>
               </div>
-              <button onClick={()=>imgRef.current?.click()} disabled={importing}
-                style={{background:importing?"transparent":C.accent,border:"1.5px solid "+C.accent,borderRadius:9,padding:"10px 18px",color:importing?C.accent:"#fff",fontSize:13,fontWeight:700,cursor:importing?"default":"pointer",flexShrink:0}}>
-                {importing?"Reading...":"📸 Import Photo"}
-              </button>
+              <div style={{display:"flex",gap:8,flexShrink:0,flexWrap:"wrap"}}>
+                <button onClick={()=>pdfRef.current?.click()} disabled={importing}
+                  style={{background:importing?"transparent":C.accent,border:"1.5px solid "+C.accent,borderRadius:9,padding:"10px 16px",color:importing?C.accent:"#fff",fontSize:13,fontWeight:700,cursor:importing?"default":"pointer"}}>
+                  {importing?"Reading...":"📄 Upload Trip Sheet"}
+                </button>
+                <button onClick={()=>imgRef.current?.click()} disabled={importing}
+                  style={{background:"transparent",border:"1.5px solid "+C.accent,borderRadius:9,padding:"10px 16px",color:C.accent,fontSize:13,fontWeight:700,cursor:importing?"default":"pointer"}}>
+                  📸 Photo
+                </button>
+              </div>
             </div>
             {importMsg&&<div style={{marginTop:10,fontSize:13,color:importMsg.startsWith("✅")?C.green:importMsg.startsWith("❌")?C.red:C.gold,fontWeight:500}}>{importMsg}</div>}
             <div style={{marginTop:12,paddingTop:12,borderTop:"1px solid "+C.border}}>
