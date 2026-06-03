@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.26";
+const APP_VERSION = "1.27";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -1214,6 +1214,7 @@ function Field({
   legContext
 }) {
   const [showPad, setShowPad] = useState(false);
+  const wide = useWide();
   const lc = color || C.accent;
   useEffect(() => {
     if (!fieldId) return;
@@ -1240,7 +1241,29 @@ function Field({
     style: {
       position: "relative"
     }
-  }, /*#__PURE__*/React.createElement("input", {
+  }, wide ? /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    inputMode: "decimal",
+    value: value,
+    onChange: e => onChange(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter" && onNext) {
+        e.preventDefault();
+        onNext();
+      }
+    },
+    style: {
+      width: "100%",
+      background: lc + "0d",
+      border: "1.5px solid " + lc + "55",
+      borderRadius: 8,
+      padding: "10px 12px",
+      color: C.text,
+      fontSize: 16,
+      outline: "none",
+      boxSizing: "border-box"
+    }
+  }) : /*#__PURE__*/React.createElement("input", {
     readOnly: true,
     value: value,
     onClick: () => setShowPad(true),
@@ -1256,7 +1279,7 @@ function Field({
       boxSizing: "border-box",
       cursor: "pointer"
     }
-  }), showPad && /*#__PURE__*/React.createElement(NumPadOverlay, {
+  }), !wide && showPad && /*#__PURE__*/React.createElement(NumPadOverlay, {
     onClose: () => setShowPad(false)
   }, /*#__PURE__*/React.createElement(NumPad, {
     value: value,
@@ -8588,6 +8611,28 @@ function E6B() {
   // FOB input with numpad
   function FobField() {
     const [showPad, setShowPad] = useState(false);
+    if (wide) return /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: "relative"
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "text",
+      inputMode: "decimal",
+      value: initialFob,
+      onChange: e => setInitialFob(e.target.value),
+      style: {
+        width: "100%",
+        background: C.inputBg,
+        border: "1.5px solid " + C.accent + "55",
+        borderRadius: 8,
+        padding: "11px 14px",
+        color: C.text,
+        fontSize: 16,
+        fontWeight: 700,
+        outline: "none",
+        boxSizing: "border-box"
+      }
+    }));
     return /*#__PURE__*/React.createElement("div", {
       style: {
         position: "relative"

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.26";
+const APP_VERSION="1.27";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -587,6 +587,7 @@ function NumPadOverlay({children,onClose}){
 // window.__e6b is a registry of open functions keyed by fieldId
 function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext}){
   const[showPad,setShowPad]=useState(false);
+  const wide=useWide();
   const lc=color||C.accent;
   useEffect(()=>{
     if(!fieldId)return;
@@ -598,10 +599,16 @@ function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext
     <div style={{marginBottom:0}}>
       <div style={{fontSize:11,fontWeight:600,color:lc,textTransform:"uppercase",letterSpacing:.8,marginBottom:5}}>{label}</div>
       <div style={{position:"relative"}}>
-        <input readOnly value={value} onClick={()=>setShowPad(true)}
-          style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
-            padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box",cursor:"pointer"}}/>
-        {showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
+        {wide
+          ?<input type="text" inputMode="decimal" value={value}
+             onChange={e=>onChange(e.target.value)}
+             onKeyDown={e=>{if(e.key==="Enter"&&onNext){e.preventDefault();onNext();}}}
+             style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
+               padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
+          :<input readOnly value={value} onClick={()=>setShowPad(true)}
+             style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
+               padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box",cursor:"pointer"}}/>}
+        {!wide&&showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
           <NumPad value={value} label={label} step={step||"any"}
             onChange={v=>{onChange(v);setShowPad(false);}}
             onClose={()=>setShowPad(false)}
@@ -3437,6 +3444,10 @@ export default function E6B(){
   // FOB input with numpad
   function FobField(){
     const[showPad,setShowPad]=useState(false);
+    if(wide)return(<div style={{position:"relative"}}>
+      <input type="text" inputMode="decimal" value={initialFob} onChange={e=>setInitialFob(e.target.value)}
+        style={{width:"100%",background:C.inputBg,border:"1.5px solid "+C.accent+"55",borderRadius:8,padding:"11px 14px",color:C.text,fontSize:16,fontWeight:700,outline:"none",boxSizing:"border-box"}}/>
+    </div>);
     return(<div style={{position:"relative"}}>
       <input readOnly value={initialFob} onClick={()=>setShowPad(true)}
         style={{width:"100%",background:C.inputBg,border:"1.5px solid "+C.accent+"55",borderRadius:8,padding:"11px 14px",color:C.text,fontSize:16,fontWeight:700,outline:"none",boxSizing:"border-box",cursor:"pointer"}}/>
