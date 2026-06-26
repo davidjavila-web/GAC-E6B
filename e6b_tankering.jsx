@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.41";
+const APP_VERSION="1.42";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -84,20 +84,22 @@ const CREW_LIMITS={
 };
 const MONTHS={JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
 const ICAO_TZ={
-  // US East
-  KTEB:-4,KJFK:-4,KLGA:-4,KEWR:-4,KBOS:-4,KMIA:-4,KFLL:-4,KPBI:-4,KMCO:-4,KTPA:-4,KRSW:-4,KPHL:-4,KDCA:-4,KBWI:-4,KIAD:-4,KATL:-4,KDTW:-4,
-  // US Central
-  KORD:-5,KIAH:-5,KHOU:-5,KDAL:-5,KMSP:-5,
-  // US Mountain
-  KDEN:-6,KPHX:-7, // AZ no DST
-  // US West
-  KLAX:-7,KSFO:-7,KLAS:-7,KSAN:-7,KSEA:-7,KPDX:-7,
+  // US East (UTC-4 in DST)
+  KAPF:-4,KATL:-4,KBDL:-4,KBOS:-4,KBWI:-4,KCHA:-4,KCHS:-4,KCLE:-4,KCLT:-4,KCMH:-4,KDCA:-4,KDTW:-4,KEWR:-4,KFLL:-4,KFXE:-4,KHPN:-4,KIAD:-4,KJAX:-4,KJFK:-4,KLGA:-4,KMCO:-4,KMIA:-4,KOPF:-4,KORF:-4,KPBI:-4,KPHL:-4,KPIT:-4,KPTK:-4,KPVD:-4,KRDU:-4,KRIC:-4,KRSW:-4,KSAV:-4,KTEB:-4,KTMB:-4,KTPA:-4,
+  // US Central (UTC-5 in DST)
+  KAUS:-5,KBHM:-5,KBNA:-5,KDAL:-5,KDFW:-5,KHOU:-5,KIAH:-5,KICT:-5,KLIT:-5,KMDW:-5,KMEM:-5,KMKE:-5,KMSP:-5,KMSY:-5,KOKC:-5,KOMK:-5,KORD:-5,KSAT:-5,KSTL:-5,KTUL:-5,
+  // US Mountain (UTC-6 in DST)
+  KABQ:-6,KAPA:-6,KASE:-6,KBIL:-6,KBJC:-6,KBOI:-6,KBZN:-6,KCOS:-6,KCYS:-6,KDEN:-6,KEGE:-6,KELP:-6,KFTG:-6,KGJT:-6,KGTF:-6,KMSO:-6,KPUB:-6,KSLC:-6,
+  // US West / Arizona (UTC-7; AZ stays -7 year-round, no DST)
+  KBUR:-7,KDVT:-7,KFAT:-7,KFFZ:-7,KGEG:-7,KGEU:-7,KHND:-7,KIWA:-7,KLAS:-7,KLAX:-7,KLGB:-7,KOAK:-7,KONT:-7,KPDX:-7,KPHX:-7,KPSP:-7,KRNO:-7,KSAN:-7,KSDL:-7,KSEA:-7,KSFO:-7,KSJC:-7,KSMF:-7,KSNA:-7,KTUS:-7,KVGT:-7,KVNY:-7,
+  // US Alaska / Hawaii
+  PANC:-8,PHNL:-10,
   // Canada
   CYYZ:-4,CYUL:-4,CYVR:-7,
   // Caribbean / Central America
   MYNN:-4,MMTO:-5,MMMX:-5,MMUN:-5,MKJS:-5,MKJP:-5,TJSJ:-4,MDPC:-4,MTPP:-5,
   // South America
-  SBGR:-3,SBRJ:-3,SCEL:-4,SAEZ:-3,
+  SBGR:-3,SBRJ:-3,SCEL:-4,SAEZ:-3,SVMI:-4,SVFM:-4,
   // UK / Iberia
   EGLL:1,EGKK:1,EGSS:1,EGGW:1,EGCC:1,LPPT:0,
   // France / Iberia
