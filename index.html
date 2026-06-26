@@ -4059,7 +4059,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.51";
+const APP_VERSION = "1.52";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -12183,68 +12183,95 @@ function FlightDutyCalc() {
       boxSizing: "border-box",
       WebkitAppearance: "none"
     }
-  }))), parsed.legs.map((leg, i) => /*#__PURE__*/React.createElement("div", {
-    key: i,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      marginBottom: 4,
-      fontSize: 12,
-      flexWrap: "wrap"
+  }))), parsed.legs.map((leg, i) => {
+    // Local times for verification against the screenshot: convert canonical UTC
+    // back to local using each endpoint's DST-aware offset for the leg's date.
+    // Unknown offset → "—".
+    const fmtClock = t => {
+      const x = (t % 1440 + 1440) % 1440;
+      return String(Math.floor(x / 60)).padStart(2, "0") + ":" + String(x % 60).padStart(2, "0");
+    };
+    let depLocal = "—",
+      arrLocal = "—";
+    if (!leg.needsTimes) {
+      const dOff = tzOffsetFor(leg.origin, leg.date),
+        aOff = tzOffsetFor(leg.dest, leg.date);
+      depLocal = dOff === null ? "—" : fmtClock(leg.depH * 60 + leg.depM + Math.round(dOff * 60));
+      arrLocal = aOff === null ? "—" : fmtClock(leg.arrH * 60 + leg.arrM + Math.round(aOff * 60));
     }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: C.accent,
-      fontWeight: 700,
-      minWidth: 18
-    }
-  }, "L", i + 1), /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: leg.needsIcaoFix ? C.red : C.text,
-      fontWeight: 700
-    }
-  }, leg.origin, "\u2192", leg.dest), leg.needsTimes ? /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: C.gold,
-      fontWeight: 700
-    }
-  }, "??:??\u2013??:??") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: C.muted
-    }
-  }, String(leg.depH).padStart(2, "0"), ":", String(leg.depM).padStart(2, "0"), "\u2013", String(leg.arrH).padStart(2, "0"), ":", String(leg.arrM).padStart(2, "0")), /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: C.gold
-    }
-  }, fmtHM(leg.flightMins))), leg.needsIcaoFix && /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 9,
-      background: C.red + "22",
-      color: C.red,
-      padding: "2px 6px",
-      borderRadius: 4,
-      fontWeight: 700
-    }
-  }, "FIX ICAO"), leg.needsTimes && /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 9,
-      background: C.gold + "22",
-      color: C.gold,
-      padding: "2px 6px",
-      borderRadius: 4,
-      fontWeight: 700
-    }
-  }, "TAP EDIT"), leg.hasRest && /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 9,
-      background: C.green + "22",
-      color: C.green,
-      padding: "2px 6px",
-      borderRadius: 4,
-      fontWeight: 700
-    }
-  }, "REST"))), !addingMore && dutyInputMode === "import" && /*#__PURE__*/React.createElement("button", {
+    return /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        marginBottom: 6
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        fontSize: 12,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.accent,
+        fontWeight: 700,
+        minWidth: 18
+      }
+    }, "L", i + 1), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: leg.needsIcaoFix ? C.red : C.text,
+        fontWeight: 700
+      }
+    }, leg.origin, "\u2192", leg.dest), leg.needsTimes ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.gold,
+        fontWeight: 700
+      }
+    }, "??:??\u2013??:??") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.muted
+      }
+    }, String(leg.depH).padStart(2, "0"), ":", String(leg.depM).padStart(2, "0"), "\u2013", String(leg.arrH).padStart(2, "0"), ":", String(leg.arrM).padStart(2, "0"), " UTC"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: C.gold
+      }
+    }, fmtHM(leg.flightMins))), leg.needsIcaoFix && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 9,
+        background: C.red + "22",
+        color: C.red,
+        padding: "2px 6px",
+        borderRadius: 4,
+        fontWeight: 700
+      }
+    }, "FIX ICAO"), leg.needsTimes && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 9,
+        background: C.gold + "22",
+        color: C.gold,
+        padding: "2px 6px",
+        borderRadius: 4,
+        fontWeight: 700
+      }
+    }, "TAP EDIT"), leg.hasRest && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 9,
+        background: C.green + "22",
+        color: C.green,
+        padding: "2px 6px",
+        borderRadius: 4,
+        fontWeight: 700
+      }
+    }, "REST")), !leg.needsTimes && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10,
+        color: C.sub,
+        marginLeft: 26,
+        marginTop: 1
+      }
+    }, depLocal, " ", leg.origin, " \u2192 ", arrLocal, " ", leg.dest, " local"));
+  }), !addingMore && dutyInputMode === "import" && /*#__PURE__*/React.createElement("button", {
     onClick: addAnotherScreenshot,
     style: {
       width: "100%",

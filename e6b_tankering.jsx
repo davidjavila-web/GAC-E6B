@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.51";
+const APP_VERSION="1.52";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3539,18 +3539,34 @@ function FlightDutyCalc(){
             style={{width:"100%",background:C.bg,border:"1px solid "+C.border,borderRadius:8,padding:"8px",color:C.text,fontSize:11,fontFamily:"monospace",lineHeight:1.5,resize:"vertical",outline:"none",boxSizing:"border-box",WebkitAppearance:"none"}}/>
         </div>}
       </div>}
-      {parsed.legs.map((leg,i)=>(
-        <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,fontSize:12,flexWrap:"wrap"}}>
-          <span style={{color:C.accent,fontWeight:700,minWidth:18}}>L{i+1}</span>
-          <span style={{color:leg.needsIcaoFix?C.red:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
-          {leg.needsTimes
-            ?<span style={{color:C.gold,fontWeight:700}}>??:??–??:??</span>
-            :<><span style={{color:C.muted}}>{String(leg.depH).padStart(2,"0")}:{String(leg.depM).padStart(2,"0")}–{String(leg.arrH).padStart(2,"0")}:{String(leg.arrM).padStart(2,"0")}</span>
-          <span style={{color:C.gold}}>{fmtHM(leg.flightMins)}</span></>}
-          {leg.needsIcaoFix&&<span style={{fontSize:9,background:C.red+"22",color:C.red,padding:"2px 6px",borderRadius:4,fontWeight:700}}>FIX ICAO</span>}
-          {leg.needsTimes&&<span style={{fontSize:9,background:C.gold+"22",color:C.gold,padding:"2px 6px",borderRadius:4,fontWeight:700}}>TAP EDIT</span>}
-          {leg.hasRest&&<span style={{fontSize:9,background:C.green+"22",color:C.green,padding:"2px 6px",borderRadius:4,fontWeight:700}}>REST</span>}
-        </div>))}
+      {parsed.legs.map((leg,i)=>{
+        // Local times for verification against the screenshot: convert canonical UTC
+        // back to local using each endpoint's DST-aware offset for the leg's date.
+        // Unknown offset → "—".
+        const fmtClock=t=>{const x=((t%1440)+1440)%1440;return String(Math.floor(x/60)).padStart(2,"0")+":"+String(x%60).padStart(2,"0");};
+        let depLocal="—",arrLocal="—";
+        if(!leg.needsTimes){
+          const dOff=tzOffsetFor(leg.origin,leg.date),aOff=tzOffsetFor(leg.dest,leg.date);
+          depLocal=dOff===null?"—":fmtClock(leg.depH*60+leg.depM+Math.round(dOff*60));
+          arrLocal=aOff===null?"—":fmtClock(leg.arrH*60+leg.arrM+Math.round(aOff*60));
+        }
+        return(<div key={i} style={{marginBottom:6}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,flexWrap:"wrap"}}>
+            <span style={{color:C.accent,fontWeight:700,minWidth:18}}>L{i+1}</span>
+            <span style={{color:leg.needsIcaoFix?C.red:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
+            {leg.needsTimes
+              ?<span style={{color:C.gold,fontWeight:700}}>??:??–??:??</span>
+              :<><span style={{color:C.muted}}>{String(leg.depH).padStart(2,"0")}:{String(leg.depM).padStart(2,"0")}–{String(leg.arrH).padStart(2,"0")}:{String(leg.arrM).padStart(2,"0")} UTC</span>
+            <span style={{color:C.gold}}>{fmtHM(leg.flightMins)}</span></>}
+            {leg.needsIcaoFix&&<span style={{fontSize:9,background:C.red+"22",color:C.red,padding:"2px 6px",borderRadius:4,fontWeight:700}}>FIX ICAO</span>}
+            {leg.needsTimes&&<span style={{fontSize:9,background:C.gold+"22",color:C.gold,padding:"2px 6px",borderRadius:4,fontWeight:700}}>TAP EDIT</span>}
+            {leg.hasRest&&<span style={{fontSize:9,background:C.green+"22",color:C.green,padding:"2px 6px",borderRadius:4,fontWeight:700}}>REST</span>}
+          </div>
+          {!leg.needsTimes&&<div style={{fontSize:10,color:C.sub,marginLeft:26,marginTop:1}}>
+            {depLocal} {leg.origin} → {arrLocal} {leg.dest} local
+          </div>}
+        </div>);
+      })}
 
       {/* Add another single-column screenshot — its legs append to the list above.
           Prominent and placed right below the leg list so the multi-shot flow is obvious. */}
