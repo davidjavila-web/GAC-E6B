@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.39";
+const APP_VERSION="1.40";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2703,33 +2703,42 @@ function fmtEpochT(ms,z){const d=new Date(ms);const hh=String(d.getHours()).padS
 function fmtHM(mins){const h=Math.floor(mins/60);const m=Math.round(mins%60);return`${h}:${String(m).padStart(2,"0")}`;}
 function fmtHrs2(hrs){const h=Math.floor(hrs);const m=Math.round((hrs-h)*60);return`${h}:${String(m).padStart(2,"0")}`;}
 
-function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customOffsets){
-  const limits=CREW_LIMITS[crewMode]||CREW_LIMITS[2];
+function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customOffsets,crewOverrides){
+  crewOverrides=crewOverrides||{};
+  // Each duty period uses its own crew config (override) or the global default.
+  const crewModeFor=pi=>crewOverrides[pi]||crewMode;
+  const limitsFor=pi=>CREW_LIMITS[crewModeFor(pi)]||CREW_LIMITS[2];
+  const limits=CREW_LIMITS[crewMode]||CREW_LIMITS[2]; // global default, kept for summary displays
   const violations=[];const dutyResults=[];let totalFlight=0,totalDuty=0,totalRest=0;const allLegs=[];
   periods.forEach((period,pi)=>{
+    const pLimits=limitsFor(pi);
     const onOff=customOffsets[pi]||{on:dutyOnDefMin,off:dutyOffDefMin};
     const pLegs=period.legs;
     const firstDep=pLegs[0].depEpoch,lastArr=pLegs[pLegs.length-1].arrEpoch;
     const dutyStart=firstDep-onOff.on*60000,dutyEnd=lastArr+onOff.off*60000;
     const dutyHrs=(dutyEnd-dutyStart)/3600000;
     const flightHrs=pLegs.reduce((s,l)=>s+l.flightMins/60,0);
-    const dutyPct=dutyHrs/limits.duty,flightPct=flightHrs/limits.flight;
+    const dutyPct=dutyHrs/pLimits.duty,flightPct=flightHrs/pLimits.flight;
     const dutyStatus=dutyPct>1?"red":dutyPct>=0.8?"amber":"green";
     const flightStatus=flightPct>1?"red":flightPct>=0.8?"amber":"green";
-    if(dutyHrs>limits.duty)violations.push({period:pi,type:"duty",msg:`Duty period ${pi+1} is ${dutyHrs.toFixed(1)} hrs — exceeds ${limits.duty} hr max for ${limits.label}.`});
-    if(flightHrs>limits.flight)violations.push({period:pi,type:"flight",msg:`Flight time in duty period ${pi+1} is ${flightHrs.toFixed(1)} hrs — exceeds ${limits.flight} hr max for ${limits.label}.`});
+    if(dutyHrs>pLimits.duty)violations.push({period:pi,type:"duty",msg:`Duty period ${pi+1} is ${dutyHrs.toFixed(1)} hrs — exceeds ${pLimits.duty} hr max for ${pLimits.label}.`});
+    if(flightHrs>pLimits.flight)violations.push({period:pi,type:"flight",msg:`Flight time in duty period ${pi+1} is ${flightHrs.toFixed(1)} hrs — exceeds ${pLimits.flight} hr max for ${pLimits.label}.`});
     totalFlight+=flightHrs;totalDuty+=dutyHrs;
     pLegs.forEach(l=>allLegs.push({...l,periodIdx:pi}));
-    dutyResults.push({periodIdx:pi,legs:pLegs,dutyStart,dutyEnd,dutyHrs,flightHrs,dutyStatus,flightStatus,onMin:onOff.on,offMin:onOff.off});
+    dutyResults.push({periodIdx:pi,legs:pLegs,dutyStart,dutyEnd,dutyHrs,flightHrs,dutyStatus,flightStatus,onMin:onOff.on,offMin:onOff.off,crewMode:crewModeFor(pi),limits:pLimits});
   });
   for(let i=1;i<dutyResults.length;i++){
     const restHrs=(dutyResults[i].dutyStart-dutyResults[i-1].dutyEnd)/3600000;
-    dutyResults[i].restBefore=restHrs;totalRest+=restHrs;
-    if(restHrs<limits.rest)violations.push({period:i,type:"rest",msg:`Rest before duty period ${i+1} is ${restHrs.toFixed(1)} hrs — minimum ${limits.rest} hrs required for ${limits.label}.`});
+    // Rest BEFORE a duty period must satisfy the UPCOMING (this) period's crew config.
+    const rLimits=limitsFor(i);
+    dutyResults[i].restBefore=restHrs;dutyResults[i].restLimit=rLimits.rest;totalRest+=restHrs;
+    if(restHrs<rLimits.rest)violations.push({period:i,type:"rest",msg:`Rest before duty period ${i+1} is ${restHrs.toFixed(1)} hrs — minimum ${rLimits.rest} hrs required for ${rLimits.label}.`});
   }
-  // Rolling 24-hour check
+  // Rolling 24-hour check — limit comes from the CURRENT duty period's crew config,
+  // but ALL flight time in the prior 24 hrs counts regardless of which crew flew it.
   for(let li=0;li<allLegs.length;li++){
     const leg=allLegs[li];
+    const r24Limit=limitsFor(leg.periodIdx).rolling24;
     const checkPoints=[];
     for(let t=leg.depEpoch;t<=leg.arrEpoch;t+=1800000)checkPoints.push(t);
     if(!checkPoints.includes(leg.arrEpoch))checkPoints.push(leg.arrEpoch);
@@ -2739,10 +2748,10 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
         const os=Math.max(ol.depEpoch,w24),oe=Math.min(ol.arrEpoch,t);
         if(oe>os){const hrs=(oe-os)/3600000;flt+=hrs;contribs.push({origin:ol.origin,dest:ol.dest,hrs});}
       }
-      if(flt>limits.rolling24){
+      if(flt>r24Limit){
         const exists=violations.find(v=>v.type==="rolling24"&&v.legIdx===li&&Math.abs((v.time||0)-t)<1800000);
         if(!exists)violations.push({period:leg.periodIdx,type:"rolling24",legIdx:li,time:t,total:flt,leg,contributors:contribs,
-          msg:`Rolling 24-hr limit exceeded at ${fmtEpochT(t)}: ${flt.toFixed(1)} hrs flight (max ${limits.rolling24}).`});
+          msg:`Rolling 24-hr limit exceeded at ${fmtEpochT(t)}: ${flt.toFixed(1)} hrs flight (max ${r24Limit}).`});
       }
     }
   }
@@ -2753,6 +2762,7 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
 function FlightDutyCalc(){
   const wide=useWide();
   const[crewMode,setCrewMode]=useState(2);
+  const[crewOverrides,setCrewOverrides]=useState({}); // { [dpIndex]: crewMode } — per-duty-period crew config
   const[dutyInputMode,setDutyInputMode]=useState("import"); // "import" or "manual"
   const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:"",mode:"Z"}]);
   const[pasteText,setPasteText]=useState("");
@@ -3132,14 +3142,28 @@ function FlightDutyCalc(){
     if(!legs[0].date){setParseError("Enter the start date for leg 1.");return;}
     const resolved=resolveLegTimes(legs);
     const periods=groupDutyPeriods(resolved);
-    const analysis=computeDutyAnalysis(periods,crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets);
+    const analysis=computeDutyAnalysis(periods,crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets,crewOverrides);
+    setResult(analysis);
+  }
+
+  // Recompute analysis in place (used when a per-duty-period crew config or the
+  // global "set all" selector changes while results are showing). gMode overrides
+  // the global crewMode so we don't read stale state after setCrewMode.
+  function recomputeWith(overrides,gMode){
+    if(!parsed)return;
+    let legs=[...parsed.legs];
+    if(needDate&&startDay)legs[0]={...legs[0],date:{day:Number(startDay),month:startMonth,year2:Number(startYear)}};
+    if(!legs[0].date)return;
+    const resolved=resolveLegTimes(legs);
+    const periods=groupDutyPeriods(resolved);
+    const analysis=computeDutyAnalysis(periods,gMode??crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets,overrides);
     setResult(analysis);
   }
 
   function handleOffsetChange(pi,field,val){setCustomOffsets(prev=>({...prev,[pi]:{...(prev[pi]||{on:Number(dutyOnDef)||0,off:Number(dutyOffDef)||0}),[field]:Number(val)}}));}
   function statusColor(s){return s==="red"?C.red:s==="amber"?C.gold:C.green;}
   function statusLabel(s){return s==="red"?"EXCEEDED":s==="amber"?"CAUTION":"OK";}
-  function resetAll(){setParsed(null);setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);}
+  function resetAll(){setParsed(null);setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);}
 
   function editLegs(){
     if(!parsed)return;
@@ -3332,7 +3356,7 @@ function FlightDutyCalc(){
       {parseError&&<div style={{fontSize:12,color:C.red,fontWeight:600,marginTop:8}}>{parseError}</div>}
 
       <div style={{display:"flex",gap:10,marginTop:14}}>
-        <button onClick={()=>{setParsed(null);setNeedDate(false);setUnknownIcaos({});}} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.border,color:C.muted,fontSize:14,fontWeight:700,cursor:"pointer"}}>Re-paste</button>
+        <button onClick={()=>{setParsed(null);setNeedDate(false);setUnknownIcaos({});setCrewOverrides({});}} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.border,color:C.muted,fontSize:14,fontWeight:700,cursor:"pointer"}}>Re-paste</button>
         <button onClick={editLegs} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.accent+"44",color:C.accent,fontSize:14,fontWeight:700,cursor:"pointer"}}>✏️ Edit</button>
         <button onClick={runCalc} style={{flex:2,padding:14,borderRadius:12,background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",border:"none",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",letterSpacing:.3}}>Calculate →</button>
       </div>
@@ -3342,8 +3366,9 @@ function FlightDutyCalc(){
     <div style={{background:C.card,border:"1px solid "+C.border,borderRadius:12,padding:14,marginBottom:14}}>
       <div style={{fontSize:11,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:.8,marginBottom:10}}>Crew Configuration</div>
       <div style={{display:"flex",gap:0,background:C.bg,borderRadius:10,padding:3,border:"1px solid "+C.border}}>
-        {[2,3,4].map(n=>(<button key={n} onClick={()=>{setCrewMode(n);if(result)setResult(null);}} style={{flex:1,padding:"10px 6px",borderRadius:8,border:"none",background:crewMode===n?C.accent+"22":"transparent",color:crewMode===n?C.accent:C.muted,fontSize:13,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
+        {[2,3,4].map(n=>(<button key={n} onClick={()=>{setCrewMode(n);setCrewOverrides({});if(result)recomputeWith({},n);}} style={{flex:1,padding:"10px 6px",borderRadius:8,border:"none",background:crewMode===n?C.accent+"22":"transparent",color:crewMode===n?C.accent:C.muted,fontSize:13,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
       </div>
+      <div style={{fontSize:10,color:C.muted,marginTop:8,lineHeight:1.4}}>Sets the default for all duty periods. Each period can be changed individually in the results below.</div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginTop:10}}>
         {[{l:"Duty",v:limits.duty+"h"},{l:"Flight",v:limits.flight+"h"},{l:"Rest",v:limits.rest+"h"},{l:"24hr",v:limits.rolling24+"h"}].map(({l,v})=>(
           <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 4px",textAlign:"center"}}>
@@ -3385,11 +3410,15 @@ function FlightDutyCalc(){
     </div>}
 
     {/* ══ RESULTS ══ */}
-    {result&&<div>
+    {result&&(()=>{
+      const crewModesUsed=[...new Set(result.dutyResults.map(d=>d.crewMode))];
+      const mixedCrew=crewModesUsed.length>1;
+      const hdrLim=mixedCrew?null:(result.dutyResults[0]?result.dutyResults[0].limits:limits);
+      return(<div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <span style={{background:C.accent+"22",color:C.accent,padding:"5px 12px",borderRadius:7,fontSize:12,fontWeight:800,letterSpacing:.5}}>{limits.label.toUpperCase()}</span>
-          <span style={{fontSize:11,color:C.muted}}>{limits.reg}</span>
+          <span style={{background:C.accent+"22",color:C.accent,padding:"5px 12px",borderRadius:7,fontSize:12,fontWeight:800,letterSpacing:.5}}>{mixedCrew?"MIXED CREW":hdrLim.label.toUpperCase()}</span>
+          <span style={{fontSize:11,color:C.muted}}>{mixedCrew?"varies by duty period":hdrLim.reg}</span>
         </div>
         <div style={{display:"flex",gap:0,background:C.bg,borderRadius:7,padding:2,border:"1px solid "+C.border}}>
           {["local","zulu"].map(m=>(<button key={m} onClick={()=>setTimeMode(m)} style={{padding:"4px 10px",borderRadius:5,border:"none",background:timeMode===m?C.accent+"22":"transparent",color:timeMode===m?C.accent:C.muted,fontSize:11,fontWeight:700,cursor:"pointer",textTransform:"uppercase"}}>{m==="local"?"LCL":"UTC"}</button>))}
@@ -3415,22 +3444,29 @@ function FlightDutyCalc(){
             </div>
             <span style={{fontSize:10,color:wc,fontWeight:700,textTransform:"uppercase"}}>{statusLabel(worst)}</span>
           </div>
+          {/* Per-duty-period crew config */}
+          <div style={{marginBottom:10}}>
+            <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4,marginBottom:4}}>Crew · {dp.limits.reg}</div>
+            <div style={{display:"flex",gap:0,background:C.bg,borderRadius:8,padding:2,border:"1px solid "+C.border}}>
+              {[2,3,4].map(n=>(<button key={n} onClick={()=>{const no={...crewOverrides,[i]:n};setCrewOverrides(no);recomputeWith(no);}} style={{flex:1,padding:"6px 4px",borderRadius:6,border:"none",background:dp.crewMode===n?C.accent+"22":"transparent",color:dp.crewMode===n?C.accent:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
+            </div>
+          </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
             {[{l:"Duty On",v:fmtEpochT(dp.dutyStart,timeMode==="zulu")},{l:"Duty Off",v:fmtEpochT(dp.dutyEnd,timeMode==="zulu")}].map(({l,v})=>(
               <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4}}>{l}</div><div style={{fontSize:13,fontWeight:700,color:C.text,marginTop:2}}>{v}</div></div>))}
           </div>
           {/* Duty bar */}
           <div style={{marginBottom:10}}>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}><span style={{color:C.muted}}>Duty</span><span style={{color:statusColor(dp.dutyStatus),fontWeight:700}}>{fmtHrs2(dp.dutyHrs)} / {limits.duty}h</span></div>
-            <div style={{height:6,background:C.bg,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,dp.dutyHrs/limits.duty*100)+"%",background:statusColor(dp.dutyStatus),borderRadius:3,transition:"width 0.3s"}}/></div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}><span style={{color:C.muted}}>Duty</span><span style={{color:statusColor(dp.dutyStatus),fontWeight:700}}>{fmtHrs2(dp.dutyHrs)} / {dp.limits.duty}h</span></div>
+            <div style={{height:6,background:C.bg,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,dp.dutyHrs/dp.limits.duty*100)+"%",background:statusColor(dp.dutyStatus),borderRadius:3,transition:"width 0.3s"}}/></div>
           </div>
           {/* Flight bar */}
           <div style={{marginBottom:10}}>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}><span style={{color:C.muted}}>Flight</span><span style={{color:statusColor(dp.flightStatus),fontWeight:700}}>{fmtHrs2(dp.flightHrs)} / {limits.flight}h</span></div>
-            <div style={{height:6,background:C.bg,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,dp.flightHrs/limits.flight*100)+"%",background:statusColor(dp.flightStatus),borderRadius:3,transition:"width 0.3s"}}/></div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}><span style={{color:C.muted}}>Flight</span><span style={{color:statusColor(dp.flightStatus),fontWeight:700}}>{fmtHrs2(dp.flightHrs)} / {dp.limits.flight}h</span></div>
+            <div style={{height:6,background:C.bg,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,dp.flightHrs/dp.limits.flight*100)+"%",background:statusColor(dp.flightStatus),borderRadius:3,transition:"width 0.3s"}}/></div>
           </div>
-          {dp.restBefore!==undefined&&<div style={{background:(dp.restBefore>=limits.rest?C.green:C.red)+"0d",border:"1px solid "+(dp.restBefore>=limits.rest?C.green:C.red)+"33",borderRadius:8,padding:"6px 10px",marginBottom:10,display:"flex",justifyContent:"space-between",fontSize:11}}>
-            <span style={{color:C.muted}}>Rest before</span><span style={{color:dp.restBefore>=limits.rest?C.green:C.red,fontWeight:700}}>{fmtHrs2(dp.restBefore)} (min {limits.rest}h)</span>
+          {dp.restBefore!==undefined&&<div style={{background:(dp.restBefore>=dp.limits.rest?C.green:C.red)+"0d",border:"1px solid "+(dp.restBefore>=dp.limits.rest?C.green:C.red)+"33",borderRadius:8,padding:"6px 10px",marginBottom:10,display:"flex",justifyContent:"space-between",fontSize:11}}>
+            <span style={{color:C.muted}}>Rest before</span><span style={{color:dp.restBefore>=dp.limits.rest?C.green:C.red,fontWeight:700}}>{fmtHrs2(dp.restBefore)} (min {dp.limits.rest}h)</span>
           </div>}
           {/* Per-duty offsets */}
           <div style={{display:"flex",gap:8,marginBottom:10}}>
@@ -3466,8 +3502,8 @@ function FlightDutyCalc(){
         <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:18}}>🛏️</span>
           <div><div style={{fontSize:12,fontWeight:700,color:C.text}}>Required Rest After Mission</div>
             <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-              Minimum {limits.rest} hrs before next duty
-              {result.dutyResults.length>0&&(()=>{const le=result.dutyResults[result.dutyResults.length-1].dutyEnd;return` · Available at ${fmtEpochT(le+limits.rest*3600000,timeMode==="zulu")}`;})()}
+              {(()=>{const lastLim=result.dutyResults.length>0?result.dutyResults[result.dutyResults.length-1].limits:limits;return`Minimum ${lastLim.rest} hrs before next duty`;})()}
+              {result.dutyResults.length>0&&(()=>{const last=result.dutyResults[result.dutyResults.length-1];return` · Available at ${fmtEpochT(last.dutyEnd+last.limits.rest*3600000,timeMode==="zulu")}`;})()}
             </div></div></div>
       </div>
 
@@ -3480,6 +3516,9 @@ function FlightDutyCalc(){
 
       {showExplain&&(()=>{
         const lim=result.limits;
+        const crewModesUsed=[...new Set(result.dutyResults.map(d=>d.crewMode))];
+        const mixedCrew=crewModesUsed.length>1;
+        const sumLim=mixedCrew?null:(result.dutyResults[0]?result.dutyResults[0].limits:lim);
         const pad=n=>String(n).padStart(2,"0");
         const utcStr=(h,m)=>`${pad(h)}:${pad(m)}`;
         const localStr=(h,m,icao)=>{
@@ -3500,21 +3539,29 @@ function FlightDutyCalc(){
 
           {/* 1. Crew rules summary */}
           <div style={{padding:"12px 14px",borderBottom:"1px solid "+C.border,background:C.bg}}>
-            <div style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:8}}>
-              <span style={{background:C.accent,color:"#fff",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:800,letterSpacing:.4}}>👥 {lim.label.toUpperCase()}</span>
-              <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Duty max <b style={{color:C.text}}>{lim.duty}h</b></span>
-              <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Flight max <b style={{color:C.text}}>{lim.flight}h</b></span>
-              <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Min rest <b style={{color:C.text}}>{lim.rest}h</b></span>
-              <span style={{fontSize:11,color:C.sub,fontWeight:600}}>24h rolling <b style={{color:C.text}}>{lim.rolling24}h</b></span>
-            </div>
+            {mixedCrew?(
+              <div style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                <span style={{background:C.accent,color:"#fff",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:800,letterSpacing:.4}}>👥 MIXED CREW</span>
+                <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Crew config varies by duty period — limits shown on each below.</span>
+              </div>
+            ):(
+              <div style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                <span style={{background:C.accent,color:"#fff",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:800,letterSpacing:.4}}>👥 {sumLim.label.toUpperCase()}</span>
+                <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Duty max <b style={{color:C.text}}>{sumLim.duty}h</b></span>
+                <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Flight max <b style={{color:C.text}}>{sumLim.flight}h</b></span>
+                <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Min rest <b style={{color:C.text}}>{sumLim.rest}h</b></span>
+                <span style={{fontSize:11,color:C.sub,fontWeight:600}}>24h rolling <b style={{color:C.text}}>{sumLim.rolling24}h</b></span>
+              </div>
+            )}
           </div>
 
           {/* 2. Duty period sections + 3. Rest bars */}
           <div style={{padding:"12px 14px"}}>
             {result.dutyResults.map((dp,dpi)=>{
-              const dutyOk=dp.dutyHrs<=lim.duty,flightOk=dp.flightHrs<=lim.flight;
-              const dutyPct=Math.round(dp.dutyHrs/lim.duty*100),flightPct=Math.round(dp.flightHrs/lim.flight*100);
-              const restOk=dp.restBefore===undefined||dp.restBefore>=lim.rest;
+              const dpLim=dp.limits;
+              const dutyOk=dp.dutyHrs<=dpLim.duty,flightOk=dp.flightHrs<=dpLim.flight;
+              const dutyPct=Math.round(dp.dutyHrs/dpLim.duty*100),flightPct=Math.round(dp.flightHrs/dpLim.flight*100);
+              const restOk=dp.restBefore===undefined||dp.restBefore>=dpLim.rest;
               const exceeded=!dutyOk||!flightOk||!restOk;
               const caution=!exceeded&&((dutyPct>=80)||(flightPct>=80));
               const dpLabel=exceeded?"EXCEEDED":caution?"CAUTION":"ALL CLEAR";
@@ -3522,12 +3569,12 @@ function FlightDutyCalc(){
               return(<React.Fragment key={dpi}>
                 {/* Rest bar between periods */}
                 {dpi>0&&dp.restBefore!==undefined&&(()=>{
-                  const ok=dp.restBefore>=lim.rest;
+                  const ok=dp.restBefore>=dpLim.rest;
                   return(<div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",margin:"4px 0 10px",background:(ok?C.green:C.red)+"14",borderRadius:10,border:"1px solid "+(ok?C.green:C.red)+"44"}}>
                     <span style={{fontSize:14}}>🛏️</span>
                     <div style={{flex:1,fontSize:12,color:C.text,fontWeight:600}}>
                       Rest: <b style={{color:ok?C.green:C.red}}>{fmtHrs2(dp.restBefore)}</b>
-                      <span style={{color:C.muted,fontWeight:500}}> · minimum {lim.rest}h</span>
+                      <span style={{color:C.muted,fontWeight:500}}> · minimum {dpLim.rest}h ({dpLim.label})</span>
                     </div>
                     <span style={{fontSize:11,color:ok?C.green:C.red,fontWeight:800}}>{ok?"✅":"❌"}</span>
                   </div>);
@@ -3537,6 +3584,7 @@ function FlightDutyCalc(){
                   {/* DP header */}
                   <div style={{padding:"10px 12px",background:dpColor+"12",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",borderBottom:"1px solid "+C.border}}>
                     <span style={{background:dpColor,color:"#fff",borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800}}>Duty Period {dpi+1}</span>
+                    <span style={{background:C.accent+"22",color:C.accent,borderRadius:6,padding:"3px 8px",fontSize:10,fontWeight:800}}>👥 {dpLim.label}</span>
                     <span style={{fontSize:12,color:C.text,fontWeight:600}}>{dateLabel(dp.dutyStart)}</span>
                     <span style={{fontSize:11,color:C.muted,fontWeight:500}}>· {dp.legs.length} leg{dp.legs.length>1?"s":""}</span>
                     <span style={{marginLeft:"auto",fontSize:10,color:dpColor,fontWeight:800,letterSpacing:.4}}>{dpLabel}</span>
@@ -3569,19 +3617,19 @@ function FlightDutyCalc(){
                   <div style={{padding:"0 12px 10px"}}>
                     <div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderTop:"1px solid "+C.border}}>
                       <span style={{fontSize:14,width:18,textAlign:"center"}}>{dutyOk?(dutyPct>=80?"⚠️":"✅"):"❌"}</span>
-                      <div style={{flex:1,fontSize:12,color:C.text}}>Duty time <b>{fmtHrs2(dp.dutyHrs)}</b> {dutyOk?"within":"exceeds"} {lim.duty}h limit</div>
+                      <div style={{flex:1,fontSize:12,color:C.text}}>Duty time <b>{fmtHrs2(dp.dutyHrs)}</b> {dutyOk?"within":"exceeds"} {dpLim.duty}h limit</div>
                       {dutyPct>=80&&<span style={{fontSize:11,fontWeight:800,color:!dutyOk?C.red:C.amber}}>{dutyPct}%</span>}
                     </div>
                     <div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderTop:"1px solid "+C.border}}>
                       <span style={{fontSize:14,width:18,textAlign:"center"}}>{flightOk?(flightPct>=80?"⚠️":"✅"):"❌"}</span>
-                      <div style={{flex:1,fontSize:12,color:C.text}}>Flight time <b>{fmtHrs2(dp.flightHrs)}</b> {flightOk?"within":"exceeds"} {lim.flight}h limit</div>
+                      <div style={{flex:1,fontSize:12,color:C.text}}>Flight time <b>{fmtHrs2(dp.flightHrs)}</b> {flightOk?"within":"exceeds"} {dpLim.flight}h limit</div>
                       {flightPct>=80&&<span style={{fontSize:11,fontWeight:800,color:!flightOk?C.red:C.amber}}>{flightPct}%</span>}
                     </div>
                     {dp.restBefore!==undefined&&(()=>{
-                      const ok=dp.restBefore>=lim.rest;
+                      const ok=dp.restBefore>=dpLim.rest;
                       return(<div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderTop:"1px solid "+C.border}}>
                         <span style={{fontSize:14,width:18,textAlign:"center"}}>{ok?"✅":"❌"}</span>
-                        <div style={{flex:1,fontSize:12,color:C.text}}>Rest before <b>{fmtHrs2(dp.restBefore)}</b> {ok?"meets":"below"} {lim.rest}h minimum</div>
+                        <div style={{flex:1,fontSize:12,color:C.text}}>Rest before <b>{fmtHrs2(dp.restBefore)}</b> {ok?"meets":"below"} {dpLim.rest}h minimum</div>
                       </div>);
                     })()}
                   </div>
@@ -3595,7 +3643,7 @@ function FlightDutyCalc(){
               return(<div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 12px",marginTop:4,background:(ok?C.green:C.red)+"14",borderRadius:10,border:"1px solid "+(ok?C.green:C.red)+"44"}}>
                 <span style={{fontSize:14}}>{ok?"✅":"❌"}</span>
                 <div style={{flex:1,fontSize:12,color:C.text,fontWeight:600}}>
-                  Rolling 24-hour flight time {ok?`within ${lim.rolling24}h limit`:`exceeded — ${r24v.length} violation${r24v.length>1?"s":""}`}
+                  Rolling 24-hour flight time {ok?(mixedCrew?"within each period's limit":`within ${sumLim.rolling24}h limit`):`exceeded — ${r24v.length} violation${r24v.length>1?"s":""}`}
                 </div>
                 <span style={{fontSize:11,color:ok?C.green:C.red,fontWeight:800}}>{ok?"PASS":"FAIL"}</span>
               </div>);
@@ -3605,13 +3653,13 @@ function FlightDutyCalc(){
             <div style={{marginTop:14,padding:"16px 14px",textAlign:"center",borderRadius:12,background:goNoGo?C.green:C.red,color:"#fff",fontSize:18,fontWeight:900,letterSpacing:1}}>
               {goNoGo?"🟢 GO":"🔴 NO-GO"}
               <div style={{fontSize:11,fontWeight:600,opacity:.9,marginTop:4,letterSpacing:.3}}>
-                {goNoGo?`All limits satisfied for ${lim.label} operations`:`${result.violations.length} violation${result.violations.length>1?"s":""} — not compliant with ${lim.reg}`}
+                {goNoGo?`All limits satisfied for ${mixedCrew?"the selected crew configs":sumLim.label+" operations"}`:`${result.violations.length} violation${result.violations.length>1?"s":""} — not compliant with ${mixedCrew?"FAR 135.267/.269":sumLim.reg}`}
               </div>
             </div>
           </div>
 
           {/* 6. Footer */}
-          <div style={{padding:"10px 14px",borderTop:"1px solid "+C.border,fontSize:10,color:C.muted,textAlign:"center",lineHeight:1.5}}>{lim.reg} · {lim.label} · For planning purposes only</div>
+          <div style={{padding:"10px 14px",borderTop:"1px solid "+C.border,fontSize:10,color:C.muted,textAlign:"center",lineHeight:1.5}}>{mixedCrew?"FAR 135.267/.269 · Mixed crew":sumLim.reg+" · "+sumLim.label} · For planning purposes only</div>
         </div>);
       })()}
 
@@ -3619,7 +3667,7 @@ function FlightDutyCalc(){
         <button onClick={editLegs} style={{flex:1,padding:14,borderRadius:12,background:C.accent,border:"none",color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer"}}>✏️ Edit Legs</button>
         <button onClick={resetAll} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.border,color:C.muted,fontSize:14,fontWeight:700,cursor:"pointer"}}>← New Calculation</button>
       </div>
-    </div>}
+    </div>);})()}
   </>);
 }
 
