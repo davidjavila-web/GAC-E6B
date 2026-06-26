@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.48";
+const APP_VERSION="1.49";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2602,7 +2602,7 @@ function parseCrewScheduleOcr(text){
       // initials). Still record the leg so the user can fill times in via Edit.
       legs.push({origin,dest,depH:null,depM:null,arrH:null,arrM:null,
         flightMins:null,hasRest:false,restMins:null,needsTimes:true,
-        date:curDate?{...curDate}:null});
+        date:curDate?{...curDate}:null,isLocal:true});
       continue;
     }
     // If one endpoint's offset is unknown, borrow the other's (common for short
@@ -2612,10 +2612,16 @@ function parseCrewScheduleOcr(text){
     const arrOff=dOff!==undefined?dOff:(oOff!==undefined?oOff:0);
     const depMin=toUtc(dep.min,depOff),arrMin=toUtc(arr.min,arrOff);
     const flightMins=(((arrMin-depMin)%1440)+1440)%1440;
+    // Crew-schedule times are LOCAL ("0530L"). Store canonical UTC for the engine,
+    // but flag the leg local-sourced and keep the ORIGINAL local times so Edit can
+    // reopen it in L mode showing exactly what was on the screenshot.
     legs.push({origin,dest,
       depH:Math.floor(depMin/60),depM:depMin%60,
       arrH:Math.floor(arrMin/60),arrM:arrMin%60,
-      flightMins,hasRest:false,restMins:null,date:curDate?{...curDate}:null});
+      flightMins,hasRest:false,restMins:null,date:curDate?{...curDate}:null,
+      isLocal:true,
+      origLocalDep:String(dep.h).padStart(2,"0")+":"+String(dep.m).padStart(2,"0"),
+      origLocalArr:String(arr.h).padStart(2,"0")+":"+String(arr.m).padStart(2,"0")});
   }
   if(legs.length===0)return null;
   // No date header found anywhere → prompt the user for the start date.
@@ -3282,13 +3288,15 @@ function FlightDutyCalc(){
         const mi=monthNames.indexOf(l.date.month);
         if(mi>0)dateStr="20"+String(l.date.year2).padStart(2,"0")+"-"+String(mi).padStart(2,"0")+"-"+String(l.date.day).padStart(2,"0");
       }
-      // Parsed times are canonical UTC. Restore the leg's original Z/L mode if it
-      // was manually entered (l.isLocal); OCR/paste legs default to Z. In L mode the
-      // visible buffers (depInput/arrInput) must show local time, derived from UTC.
+      // Parsed times are canonical UTC. Restore the leg's original Z/L mode: local-
+      // sourced legs (manual L entry or crew-schedule "0530L" times) reopen in L mode;
+      // UTC sources (ARINCDirect duty parser) default to Z. Crew-schedule legs carry
+      // the ORIGINAL local times (origLocalDep/Arr) so we show exactly what was on the
+      // screenshot rather than re-deriving from UTC; otherwise derive local from UTC.
       const isLocal=l.isLocal===true;
       const mode=isLocal?"L":"Z";
-      const depInput=isLocal?localFromUtc(depT,tzOffsetFor(l.origin,l.date)||0):depT;
-      const arrInput=isLocal?localFromUtc(arrT,tzOffsetFor(l.dest,l.date)||0):arrT;
+      const depInput=isLocal?(l.origLocalDep||localFromUtc(depT,tzOffsetFor(l.origin,l.date)||0)):depT;
+      const arrInput=isLocal?(l.origLocalArr||localFromUtc(arrT,tzOffsetFor(l.dest,l.date)||0)):arrT;
       return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode};
     });
     setManualLegs(mLegs);
