@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.44";
+const APP_VERSION="1.45";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -77,10 +77,12 @@ function getAcr(weight,pavType,subgrade){
 }
 
 // ── 10/24 Flight Duty Time Constants ──────────────────────────────────────
+// restBefore = rest immediately preceding the assignment; restAfter = rest upon completion.
+// Per eCFR: 135.267 (2-pilot) both 10h; 135.269 (3/4-pilot) 10h before / 12h after.
 const CREW_LIMITS={
-  2:{duty:14,flight:10,rest:10,rolling24:10,label:"2 Pilot",reg:"FAR 135.267"},
-  3:{duty:18,flight:12,rest:12,rolling24:12,label:"3 Pilot",reg:"FAR 135.269"},
-  4:{duty:20,flight:16,rest:12,rolling24:16,label:"4 Pilot",reg:"FAR 135.269"}
+  2:{duty:14,flight:10,restBefore:10,restAfter:10,rolling24:10,label:"2 Pilot",reg:"FAR 135.267"},
+  3:{duty:18,flight:12,restBefore:10,restAfter:12,rolling24:12,label:"3 Pilot",reg:"FAR 135.269"},
+  4:{duty:20,flight:16,restBefore:10,restAfter:12,rolling24:16,label:"4 Pilot",reg:"FAR 135.269"}
 };
 const MONTHS={JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
 const ICAO_TZ={
@@ -2714,34 +2716,50 @@ function fmtHrs2(hrs){const h=Math.floor(hrs);const m=Math.round((hrs-h)*60);ret
 
 function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customOffsets,crewOverrides){
   crewOverrides=crewOverrides||{};
-  // Each duty period uses its own crew config (override) or the global default.
-  const crewModeFor=pi=>crewOverrides[pi]||crewMode;
-  const limitsFor=pi=>CREW_LIMITS[crewModeFor(pi)]||CREW_LIMITS[2];
-  const limits=CREW_LIMITS[crewMode]||CREW_LIMITS[2]; // global default, kept for summary displays
+  const limOf=n=>CREW_LIMITS[n]||CREW_LIMITS[2];
+  const limits=CREW_LIMITS[crewMode]||CREW_LIMITS[2]; // global default fallback for summary displays
   const violations=[];const dutyResults=[];let totalFlight=0,totalDuty=0,totalRest=0;const allLegs=[];
   periods.forEach((period,pi)=>{
-    const pLimits=limitsFor(pi);
     const onOff=customOffsets[pi]||{on:dutyOnDefMin,off:dutyOffDefMin};
     const pLegs=period.legs;
+    // Per-leg crew configs. A manual DP override (crewOverrides[pi]) forces the whole period.
+    // Reading A: if ANY leg is augmented (3/4-pilot), the MAX crew config across the period's
+    // legs governs duty max, flight max and rest AFTER (135.269). Rest BEFORE is governed by the
+    // FIRST leg's crew — whoever reports for duty when the period begins (requirement 3).
+    const legCrews=pLegs.map(l=>l.crewMode||crewMode);
+    const forced=crewOverrides[pi];
+    const firstCrew=forced||legCrews[0];
+    const maxCrew=forced||Math.max(...legCrews);
+    const govLimits=limOf(maxCrew);     // duty / flight / restAfter / rolling24
+    const firstLimits=limOf(firstCrew); // restBefore
+    const augmented=maxCrew>=3;
+    const mixed=!forced&&new Set(legCrews).size>1;
     const firstDep=pLegs[0].depEpoch,lastArr=pLegs[pLegs.length-1].arrEpoch;
     const dutyStart=firstDep-onOff.on*60000,dutyEnd=lastArr+onOff.off*60000;
     const dutyHrs=(dutyEnd-dutyStart)/3600000;
     const flightHrs=pLegs.reduce((s,l)=>s+l.flightMins/60,0);
-    const dutyPct=dutyHrs/pLimits.duty,flightPct=flightHrs/pLimits.flight;
+    const dutyPct=dutyHrs/govLimits.duty,flightPct=flightHrs/govLimits.flight;
     const dutyStatus=dutyPct>1?"red":dutyPct>=0.8?"amber":"green";
     const flightStatus=flightPct>1?"red":flightPct>=0.8?"amber":"green";
-    if(dutyHrs>pLimits.duty)violations.push({period:pi,type:"duty",msg:`Duty period ${pi+1} is ${dutyHrs.toFixed(1)} hrs — exceeds ${pLimits.duty} hr max for ${pLimits.label}.`});
-    if(flightHrs>pLimits.flight)violations.push({period:pi,type:"flight",msg:`Flight time in duty period ${pi+1} is ${flightHrs.toFixed(1)} hrs — exceeds ${pLimits.flight} hr max for ${pLimits.label}.`});
+    if(dutyHrs>govLimits.duty)violations.push({period:pi,type:"duty",msg:`Duty period ${pi+1} is ${dutyHrs.toFixed(1)} hrs — exceeds ${govLimits.duty} hr max for ${govLimits.label}.`});
+    if(flightHrs>govLimits.flight)violations.push({period:pi,type:"flight",msg:`Flight time in duty period ${pi+1} is ${flightHrs.toFixed(1)} hrs — exceeds ${govLimits.flight} hr max for ${govLimits.label}.`});
     totalFlight+=flightHrs;totalDuty+=dutyHrs;
     pLegs.forEach(l=>allLegs.push({...l,periodIdx:pi}));
-    dutyResults.push({periodIdx:pi,legs:pLegs,dutyStart,dutyEnd,dutyHrs,flightHrs,dutyStatus,flightStatus,onMin:onOff.on,offMin:onOff.off,crewMode:crewModeFor(pi),limits:pLimits});
+    dutyResults.push({periodIdx:pi,legs:pLegs,dutyStart,dutyEnd,dutyHrs,flightHrs,dutyStatus,flightStatus,onMin:onOff.on,offMin:onOff.off,
+      crewMode:maxCrew,firstCrew,maxCrew,limits:govLimits,firstLimits,augmented,mixed,legCrews,restAfter:govLimits.restAfter});
   });
+  // Rest between periods = LARGER of DP(N)'s restAfter (its MAX config) and DP(N+1)'s
+  // restBefore (its FIRST-leg config).
   for(let i=1;i<dutyResults.length;i++){
-    const restHrs=(dutyResults[i].dutyStart-dutyResults[i-1].dutyEnd)/3600000;
-    // Rest BEFORE a duty period must satisfy the UPCOMING (this) period's crew config.
-    const rLimits=limitsFor(i);
-    dutyResults[i].restBefore=restHrs;dutyResults[i].restLimit=rLimits.rest;totalRest+=restHrs;
-    if(restHrs<rLimits.rest)violations.push({period:i,type:"rest",msg:`Rest before duty period ${i+1} is ${restHrs.toFixed(1)} hrs — minimum ${rLimits.rest} hrs required for ${rLimits.label}.`});
+    const prev=dutyResults[i-1],cur=dutyResults[i];
+    const restHrs=(cur.dutyStart-prev.dutyEnd)/3600000;
+    const afterHrs=prev.restAfter,beforeHrs=cur.firstLimits.restBefore;
+    const req=Math.max(afterHrs,beforeHrs);
+    cur.restBefore=restHrs;cur.restReq=req;
+    cur.restAfterPrevHrs=afterHrs;cur.restAfterPrevLabel=prev.limits.label;
+    cur.restBeforeHrs=beforeHrs;cur.restBeforeLabel=cur.firstLimits.label;
+    totalRest+=restHrs;
+    if(restHrs<req)violations.push({period:i,type:"rest",msg:`Rest before duty period ${i+1} is ${restHrs.toFixed(1)} hrs — minimum ${req} hrs required (${afterHrs}h after ${prev.limits.label} duty / ${beforeHrs}h before ${cur.firstLimits.label} start).`});
   }
   // Rolling 24-hour check — the limit comes from the CURRENT duty period's crew config,
   // but ALL flight time in the prior 24 hrs counts regardless of which crew flew it.
@@ -2759,7 +2777,7 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
       // "Current" period at t = the latest leg that has already departed.
       let curIdx=0;
       for(let k=0;k<allLegs.length;k++){if(allLegs[k].depEpoch<=t)curIdx=k;else break;}
-      const r24Limit=limitsFor(allLegs[curIdx].periodIdx).rolling24;
+      const r24Limit=dutyResults[allLegs[curIdx].periodIdx].limits.rolling24;
       const w24=t-86400000;let flt=0;const contribs=[];
       for(const ol of allLegs){
         const os=Math.max(ol.depEpoch,w24),oe=Math.min(ol.arrEpoch,t);
@@ -3165,13 +3183,11 @@ function FlightDutyCalc(){
     if(!legs[0].date){setParseError("Enter the start date for leg 1.");return;}
     const resolved=resolveLegTimes(legs);
     const periods=groupDutyPeriods(resolved);
-    // Manual entry sets a per-leg crewMode; the first leg of each duty period
-    // defines that period's crew config. Import legs have no crewMode → fall back
-    // to the global default via crewOverrides.
-    const derivedOverrides={...crewOverrides};
-    periods.forEach((p,pi)=>{if(p.legs[0]&&p.legs[0].crewMode)derivedOverrides[pi]=p.legs[0].crewMode;});
-    setCrewOverrides(derivedOverrides);
-    const analysis=computeDutyAnalysis(periods,crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets,derivedOverrides);
+    // Per-leg crewMode drives the period config inside computeDutyAnalysis (first leg →
+    // rest-before, max leg → duty/flight/rest-after). A fresh calc starts with no manual
+    // DP overrides; the per-period selector in the results view can still force a period.
+    setCrewOverrides({});
+    const analysis=computeDutyAnalysis(periods,crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets,{});
     setResult(analysis);
   }
 
@@ -3470,20 +3486,25 @@ function FlightDutyCalc(){
         const worst=dp.dutyStatus==="red"||dp.flightStatus==="red"?"red":dp.dutyStatus==="amber"||dp.flightStatus==="amber"?"amber":"green";
         const wc=statusColor(worst);
         return(<div key={i} style={{background:C.card,border:"1.5px solid "+wc+"44",borderRadius:14,padding:16,marginBottom:12}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:dp.mixed?4:12}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
               <span style={{background:wc+"22",color:wc,padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:800}}>Duty Period {i+1}</span>
+              <span style={{background:dp.augmented?C.accent+"22":C.bg,color:dp.augmented?C.accent:C.sub,padding:"3px 9px",borderRadius:6,fontSize:11,fontWeight:800,border:"1px solid "+C.border}}>{dp.limits.label}{dp.augmented?" (augmented)":""}</span>
               <span style={{fontSize:12,color:C.text,fontWeight:700}}>{dp.legs.length} leg{dp.legs.length>1?"s":""}</span>
             </div>
             <span style={{fontSize:10,color:wc,fontWeight:700,textTransform:"uppercase"}}>{statusLabel(worst)}</span>
           </div>
-          {/* Per-duty-period crew config */}
+          {dp.mixed&&<div style={{fontSize:10,color:C.sub,marginBottom:12,lineHeight:1.4}}>Legs flown {Math.min(...dp.legCrews)}→{Math.max(...dp.legCrews)} pilot; period governed by 135.269 augmented limits.</div>}
+          {/* Per-duty-period crew config (override forces the whole period) */}
           <div style={{marginBottom:10}}>
             <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4,marginBottom:4}}>Crew · {dp.limits.reg}</div>
             <div style={{display:"flex",gap:0,background:C.bg,borderRadius:8,padding:2,border:"1px solid "+C.border}}>
               {[2,3,4].map(n=>(<button key={n} onClick={()=>{const no={...crewOverrides,[i]:n};setCrewOverrides(no);recomputeWith(no);}} style={{flex:1,padding:"6px 4px",borderRadius:6,border:"none",background:dp.crewMode===n?C.accent+"22":"transparent",color:dp.crewMode===n?C.accent:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
             </div>
           </div>
+          {dp.augmented&&<div style={{background:C.accent+"0d",border:"1px solid "+C.accent+"33",borderRadius:8,padding:"8px 10px",marginBottom:10,fontSize:10,color:C.sub,lineHeight:1.5}}>
+            ℹ️ Augmented crew: FAR 135.269(b)(2) limits each pilot to 8 hours of flight deck duty (time at the controls) in any 24 consecutive hours. This tool does not track per-pilot rotation — the crew manages seat rotation to stay within this limit.
+          </div>}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
             {[{l:"Duty On",v:fmtEpochT(dp.dutyStart,timeMode==="zulu")},{l:"Duty Off",v:fmtEpochT(dp.dutyEnd,timeMode==="zulu")}].map(({l,v})=>(
               <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4}}>{l}</div><div style={{fontSize:13,fontWeight:700,color:C.text,marginTop:2}}>{v}</div></div>))}
@@ -3498,9 +3519,13 @@ function FlightDutyCalc(){
             <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}><span style={{color:C.muted}}>Flight</span><span style={{color:statusColor(dp.flightStatus),fontWeight:700}}>{fmtHrs2(dp.flightHrs)} / {dp.limits.flight}h</span></div>
             <div style={{height:6,background:C.bg,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,dp.flightHrs/dp.limits.flight*100)+"%",background:statusColor(dp.flightStatus),borderRadius:3,transition:"width 0.3s"}}/></div>
           </div>
-          {dp.restBefore!==undefined&&<div style={{background:(dp.restBefore>=dp.limits.rest?C.green:C.red)+"0d",border:"1px solid "+(dp.restBefore>=dp.limits.rest?C.green:C.red)+"33",borderRadius:8,padding:"6px 10px",marginBottom:10,display:"flex",justifyContent:"space-between",fontSize:11}}>
-            <span style={{color:C.muted}}>Rest before</span><span style={{color:dp.restBefore>=dp.limits.rest?C.green:C.red,fontWeight:700}}>{fmtHrs2(dp.restBefore)} (min {dp.limits.rest}h)</span>
-          </div>}
+          {dp.restBefore!==undefined&&(()=>{const ok=dp.restBefore>=dp.restReq;return(
+            <div style={{background:(ok?C.green:C.red)+"0d",border:"1px solid "+(ok?C.green:C.red)+"33",borderRadius:8,padding:"7px 10px",marginBottom:10,fontSize:11}}>
+              <div style={{display:"flex",justifyContent:"space-between"}}>
+                <span style={{color:C.muted}}>Rest before</span><span style={{color:ok?C.green:C.red,fontWeight:700}}>{fmtHrs2(dp.restBefore)} · min {dp.restReq}h required</span>
+              </div>
+              <div style={{fontSize:10,color:C.muted,marginTop:3,lineHeight:1.4}}>{dp.restAfterPrevHrs}h after {dp.restAfterPrevLabel} duty / {dp.restBeforeHrs}h before {dp.restBeforeLabel} start of next duty</div>
+            </div>);})()}
           {/* Per-duty offsets */}
           <div style={{display:"flex",gap:8,marginBottom:10}}>
             <div style={{flex:1}}><div style={{fontSize:9,color:C.muted,marginBottom:3}}>On offset</div>
@@ -3535,8 +3560,7 @@ function FlightDutyCalc(){
         <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:18}}>🛏️</span>
           <div><div style={{fontSize:12,fontWeight:700,color:C.text}}>Required Rest After Mission</div>
             <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-              {(()=>{const lastLim=result.dutyResults.length>0?result.dutyResults[result.dutyResults.length-1].limits:limits;return`Minimum ${lastLim.rest} hrs before next duty`;})()}
-              {result.dutyResults.length>0&&(()=>{const last=result.dutyResults[result.dutyResults.length-1];return` · Available at ${fmtEpochT(last.dutyEnd+last.limits.rest*3600000,timeMode==="zulu")}`;})()}
+              {(()=>{const last=result.dutyResults.length>0?result.dutyResults[result.dutyResults.length-1]:null;const ra=last?last.restAfter:limits.restAfter;return`Minimum ${ra} hrs before next duty (${last?last.limits.label:limits.label} rest after)`+(last?` · Available at ${fmtEpochT(last.dutyEnd+ra*3600000,timeMode==="zulu")}`:"");})()}
             </div></div></div>
       </div>
 
@@ -3582,7 +3606,7 @@ function FlightDutyCalc(){
                 <span style={{background:C.accent,color:"#fff",borderRadius:6,padding:"3px 10px",fontSize:11,fontWeight:800,letterSpacing:.4}}>👥 {sumLim.label.toUpperCase()}</span>
                 <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Duty max <b style={{color:C.text}}>{sumLim.duty}h</b></span>
                 <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Flight max <b style={{color:C.text}}>{sumLim.flight}h</b></span>
-                <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Min rest <b style={{color:C.text}}>{sumLim.rest}h</b></span>
+                <span style={{fontSize:11,color:C.sub,fontWeight:600}}>Rest <b style={{color:C.text}}>{sumLim.restBefore}h</b> before / <b style={{color:C.text}}>{sumLim.restAfter}h</b> after</span>
                 <span style={{fontSize:11,color:C.sub,fontWeight:600}}>24h rolling <b style={{color:C.text}}>{sumLim.rolling24}h</b></span>
               </div>
             )}
@@ -3594,7 +3618,7 @@ function FlightDutyCalc(){
               const dpLim=dp.limits;
               const dutyOk=dp.dutyHrs<=dpLim.duty,flightOk=dp.flightHrs<=dpLim.flight;
               const dutyPct=Math.round(dp.dutyHrs/dpLim.duty*100),flightPct=Math.round(dp.flightHrs/dpLim.flight*100);
-              const restOk=dp.restBefore===undefined||dp.restBefore>=dpLim.rest;
+              const restOk=dp.restBefore===undefined||dp.restBefore>=dp.restReq;
               const exceeded=!dutyOk||!flightOk||!restOk;
               const caution=!exceeded&&((dutyPct>=80)||(flightPct>=80));
               const dpLabel=exceeded?"EXCEEDED":caution?"CAUTION":"ALL CLEAR";
@@ -3602,12 +3626,13 @@ function FlightDutyCalc(){
               return(<React.Fragment key={dpi}>
                 {/* Rest bar between periods */}
                 {dpi>0&&dp.restBefore!==undefined&&(()=>{
-                  const ok=dp.restBefore>=dpLim.rest;
+                  const ok=dp.restBefore>=dp.restReq;
                   return(<div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",margin:"4px 0 10px",background:(ok?C.green:C.red)+"14",borderRadius:10,border:"1px solid "+(ok?C.green:C.red)+"44"}}>
                     <span style={{fontSize:14}}>🛏️</span>
                     <div style={{flex:1,fontSize:12,color:C.text,fontWeight:600}}>
                       Rest: <b style={{color:ok?C.green:C.red}}>{fmtHrs2(dp.restBefore)}</b>
-                      <span style={{color:C.muted,fontWeight:500}}> · minimum {dpLim.rest}h ({dpLim.label})</span>
+                      <span style={{color:C.muted,fontWeight:500}}> · min {dp.restReq}h required</span>
+                      <div style={{fontSize:10,color:C.muted,fontWeight:500,marginTop:2}}>{dp.restAfterPrevHrs}h after {dp.restAfterPrevLabel} duty / {dp.restBeforeHrs}h before {dp.restBeforeLabel} start of next duty</div>
                     </div>
                     <span style={{fontSize:11,color:ok?C.green:C.red,fontWeight:800}}>{ok?"✅":"❌"}</span>
                   </div>);
@@ -3617,11 +3642,13 @@ function FlightDutyCalc(){
                   {/* DP header */}
                   <div style={{padding:"10px 12px",background:dpColor+"12",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",borderBottom:"1px solid "+C.border}}>
                     <span style={{background:dpColor,color:"#fff",borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800}}>Duty Period {dpi+1}</span>
-                    <span style={{background:C.accent+"22",color:C.accent,borderRadius:6,padding:"3px 8px",fontSize:10,fontWeight:800}}>👥 {dpLim.label}</span>
+                    <span style={{background:C.accent+"22",color:C.accent,borderRadius:6,padding:"3px 8px",fontSize:10,fontWeight:800}}>👥 {dpLim.label}{dp.augmented?" (augmented)":""}</span>
                     <span style={{fontSize:12,color:C.text,fontWeight:600}}>{dateLabel(dp.dutyStart)}</span>
                     <span style={{fontSize:11,color:C.muted,fontWeight:500}}>· {dp.legs.length} leg{dp.legs.length>1?"s":""}</span>
                     <span style={{marginLeft:"auto",fontSize:10,color:dpColor,fontWeight:800,letterSpacing:.4}}>{dpLabel}</span>
                   </div>
+                  {dp.mixed&&<div style={{padding:"6px 12px",fontSize:10,color:C.sub,background:C.bg,borderBottom:"1px solid "+C.border,lineHeight:1.4}}>Legs flown {Math.min(...dp.legCrews)}→{Math.max(...dp.legCrews)} pilot; period governed by 135.269 augmented limits.</div>}
+                  {dp.augmented&&<div style={{padding:"7px 12px",fontSize:10,color:C.sub,background:C.accent+"0d",borderBottom:"1px solid "+C.border,lineHeight:1.5}}>ℹ️ Augmented crew: FAR 135.269(b)(2) limits each pilot to 8 hours of flight deck duty (time at the controls) in any 24 consecutive hours. This tool does not track per-pilot rotation — the crew manages seat rotation to stay within this limit.</div>}
                   {/* Route cards */}
                   <div style={{padding:"10px 12px"}}>
                     {dp.legs.map((leg,li)=>{
@@ -3659,10 +3686,10 @@ function FlightDutyCalc(){
                       {flightPct>=80&&<span style={{fontSize:11,fontWeight:800,color:!flightOk?C.red:C.amber}}>{flightPct}%</span>}
                     </div>
                     {dp.restBefore!==undefined&&(()=>{
-                      const ok=dp.restBefore>=dpLim.rest;
+                      const ok=dp.restBefore>=dp.restReq;
                       return(<div style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderTop:"1px solid "+C.border}}>
                         <span style={{fontSize:14,width:18,textAlign:"center"}}>{ok?"✅":"❌"}</span>
-                        <div style={{flex:1,fontSize:12,color:C.text}}>Rest before <b>{fmtHrs2(dp.restBefore)}</b> {ok?"meets":"below"} {dpLim.rest}h minimum</div>
+                        <div style={{flex:1,fontSize:12,color:C.text}}>Rest before <b>{fmtHrs2(dp.restBefore)}</b> {ok?"meets":"below"} {dp.restReq}h minimum <span style={{color:C.muted}}>({dp.restAfterPrevHrs}h after {dp.restAfterPrevLabel} / {dp.restBeforeHrs}h before {dp.restBeforeLabel})</span></div>
                       </div>);
                     })()}
                   </div>
