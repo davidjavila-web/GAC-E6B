@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.50";
+const APP_VERSION="1.51";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2545,10 +2545,13 @@ function parseCrewScheduleOcr(text){
   if(lines.length<2)return null;
   const monthNames=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
   const monthRe=new RegExp("\\b("+monthNames.join("|")+")\\b","i");
-  // ICAO sep ICAO — uppercase 4-letter codes joined by an OCR arrow/separator.
-  // OCR mangles the arrow into many forms: =» <=» «= «=» = > → etc., so the
-  // class accepts any run of guillemets/angle-brackets/arrows/dashes/etc.
-  const routeRe=/\b([A-Z]{4})\b\s*[=»«<>→➜➝+*\-–—~]+\s*\b([A-Z]{4})\b/;
+  // ICAO sep ICAO — codes joined by an OCR arrow/separator. OCR mangles the arrow
+  // into many forms: =» <=» «= «=» = > → etc. (incl. a bare "="), so the class
+  // accepts any run of guillemets/angle-brackets/arrows/dashes/plus/etc.
+  // Each code is 3–4 chars: a LEADING LETTER then alphanumerics. Accepting 3 chars
+  // catches OCR truncation (e.g. "SVMI"→"SVM"); requiring a leading letter excludes
+  // numeric time tokens like "1945 ++ 2339" from being mistaken for a route.
+  const routeRe=/\b([A-Z][A-Z0-9]{2,3})\b\s*[=»«<>→➜➝+*\-–—~]+\s*\b([A-Z][A-Z0-9]{2,3})\b/;
   const swapRe=/CREW\s*SWAP/i;
 
   // Garbled time → {h,m,min}. "0543"→05:43, "10450"→1045, "800"→0800.
@@ -2604,6 +2607,23 @@ function parseCrewScheduleOcr(text){
   }
   if(routeAt.length===0)return null;
 
+  // ICAO repair: gather every full 4-char endpoint seen anywhere in this trip so a
+  // 3-char OCR-truncated code (e.g. "SVM") can be healed to the 4-char version that
+  // appears elsewhere ("SVMI") and shares its first 3 chars. Among candidates, prefer
+  // one that's a known ICAO. Returns {icao, ok} — ok:false means it couldn't be
+  // repaired (kept as-is and flagged for the user to fix on Edit).
+  const fourCharCodes=new Set();
+  for(const i of routeAt){
+    const m=lines[i].match(routeRe);
+    if(m){if(m[1].length===4)fourCharCodes.add(m[1].toUpperCase());if(m[2].length===4)fourCharCodes.add(m[2].toUpperCase());}
+  }
+  function repairIcao(code){
+    if(code.length>=4)return{icao:code,ok:true};
+    const cands=[...fourCharCodes].filter(c=>c.length===4&&c.slice(0,3)===code);
+    if(cands.length){const known=cands.find(c=>ICAO_IANA[c]!==undefined);return{icao:known||cands[0],ok:true};}
+    return{icao:code,ok:false};
+  }
+
   // Pass 2: every route claims its OWN time line. For each route, scan forward up to
   // 3 lines (but never past the next route line) for the FIRST line that carries two
   // valid times and has not already been consumed by an earlier route. Intervening
@@ -2615,7 +2635,9 @@ function parseCrewScheduleOcr(text){
   for(let r=0;r<routeAt.length;r++){
     const i=routeAt[r];
     const rm=lines[i].match(routeRe);
-    const origin=rm[1].toUpperCase(),dest=rm[2].toUpperCase();
+    const rep1=repairIcao(rm[1].toUpperCase()),rep2=repairIcao(rm[2].toUpperCase());
+    const origin=rep1.icao,dest=rep2.icao;
+    const needsIcaoFix=!rep1.ok||!rep2.ok;
     const nextRoute=r+1<routeAt.length?routeAt[r+1]:lines.length;
     const limit=Math.min(i+3,nextRoute-1,lines.length-1);
     let dep=null,arr=null;
@@ -2628,7 +2650,7 @@ function parseCrewScheduleOcr(text){
       // Route with no times line (e.g. "MTPP =» KMIA" followed directly by crew
       // initials). Still record the leg so the user can fill times in via Edit.
       legs.push({origin,dest,depH:null,depM:null,arrH:null,arrM:null,
-        flightMins:null,hasRest:false,restMins:null,needsTimes:true,
+        flightMins:null,hasRest:false,restMins:null,needsTimes:true,needsIcaoFix,
         date:curDate?{...curDate}:null,isLocal:true});
       continue;
     }
@@ -2645,7 +2667,7 @@ function parseCrewScheduleOcr(text){
     legs.push({origin,dest,
       depH:Math.floor(depMin/60),depM:depMin%60,
       arrH:Math.floor(arrMin/60),arrM:arrMin%60,
-      flightMins,hasRest:false,restMins:null,date:curDate?{...curDate}:null,
+      flightMins,hasRest:false,restMins:null,needsIcaoFix,date:curDate?{...curDate}:null,
       isLocal:true,
       origLocalDep:String(dep.h).padStart(2,"0")+":"+String(dep.m).padStart(2,"0"),
       origLocalArr:String(arr.h).padStart(2,"0")+":"+String(arr.m).padStart(2,"0")});
@@ -3386,9 +3408,9 @@ function FlightDutyCalc(){
             <span style={{background:lc,color:"#fff",borderRadius:6,padding:"3px 8px",fontSize:11,fontWeight:800,letterSpacing:.4,flexShrink:0}}>LEG {i+1}</span>
             <input type="date" value={ml.date} onChange={e=>updateManualLeg(i,"date",e.target.value)}
               style={{flex:"1 1 130px",minWidth:120,background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"7px 8px",color:C.text,fontSize:12,fontWeight:700,boxSizing:"border-box"}}/>
-            <input value={ml.origin} onChange={e=>updateManualLeg(i,"origin",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoInputStyle,flex:"1 1 56px",minWidth:56}}/>
+            <input value={ml.origin} onChange={e=>updateManualLeg(i,"origin",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoInputStyle,flex:"1 1 56px",minWidth:56,borderColor:ml.origin&&ml.origin.length<4?C.red:C.border}}/>
             <span style={{color:C.muted,fontSize:13,fontWeight:700,flexShrink:0}}>→</span>
-            <input value={ml.dest} onChange={e=>updateManualLeg(i,"dest",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoInputStyle,flex:"1 1 56px",minWidth:56}}/>
+            <input value={ml.dest} onChange={e=>updateManualLeg(i,"dest",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoInputStyle,flex:"1 1 56px",minWidth:56,borderColor:ml.dest&&ml.dest.length<4?C.red:C.border}}/>
             <div style={{display:"flex",background:C.card,border:"1px solid "+C.border,borderRadius:6,padding:2,flexShrink:0}}>
               {["Z","L"].map(m=>(<button key={m} onClick={()=>setManualLegMode(i,m)} style={{padding:"4px 9px",borderRadius:4,border:"none",background:mode===m?(m==="L"?C.amber:C.accent):"transparent",color:mode===m?"#fff":C.muted,fontSize:11,fontWeight:800,cursor:"pointer",letterSpacing:.5}}>{m}</button>))}
             </div>
@@ -3520,11 +3542,12 @@ function FlightDutyCalc(){
       {parsed.legs.map((leg,i)=>(
         <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,fontSize:12,flexWrap:"wrap"}}>
           <span style={{color:C.accent,fontWeight:700,minWidth:18}}>L{i+1}</span>
-          <span style={{color:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
+          <span style={{color:leg.needsIcaoFix?C.red:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
           {leg.needsTimes
             ?<span style={{color:C.gold,fontWeight:700}}>??:??–??:??</span>
             :<><span style={{color:C.muted}}>{String(leg.depH).padStart(2,"0")}:{String(leg.depM).padStart(2,"0")}–{String(leg.arrH).padStart(2,"0")}:{String(leg.arrM).padStart(2,"0")}</span>
           <span style={{color:C.gold}}>{fmtHM(leg.flightMins)}</span></>}
+          {leg.needsIcaoFix&&<span style={{fontSize:9,background:C.red+"22",color:C.red,padding:"2px 6px",borderRadius:4,fontWeight:700}}>FIX ICAO</span>}
           {leg.needsTimes&&<span style={{fontSize:9,background:C.gold+"22",color:C.gold,padding:"2px 6px",borderRadius:4,fontWeight:700}}>TAP EDIT</span>}
           {leg.hasRest&&<span style={{fontSize:9,background:C.green+"22",color:C.green,padding:"2px 6px",borderRadius:4,fontWeight:700}}>REST</span>}
         </div>))}

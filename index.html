@@ -4059,7 +4059,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.50";
+const APP_VERSION = "1.51";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -10097,10 +10097,13 @@ function parseCrewScheduleOcr(text) {
   if (lines.length < 2) return null;
   const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
   const monthRe = new RegExp("\\b(" + monthNames.join("|") + ")\\b", "i");
-  // ICAO sep ICAO — uppercase 4-letter codes joined by an OCR arrow/separator.
-  // OCR mangles the arrow into many forms: =» <=» «= «=» = > → etc., so the
-  // class accepts any run of guillemets/angle-brackets/arrows/dashes/etc.
-  const routeRe = /\b([A-Z]{4})\b\s*[=»«<>→➜➝+*\-–—~]+\s*\b([A-Z]{4})\b/;
+  // ICAO sep ICAO — codes joined by an OCR arrow/separator. OCR mangles the arrow
+  // into many forms: =» <=» «= «=» = > → etc. (incl. a bare "="), so the class
+  // accepts any run of guillemets/angle-brackets/arrows/dashes/plus/etc.
+  // Each code is 3–4 chars: a LEADING LETTER then alphanumerics. Accepting 3 chars
+  // catches OCR truncation (e.g. "SVMI"→"SVM"); requiring a leading letter excludes
+  // numeric time tokens like "1945 ++ 2339" from being mistaken for a route.
+  const routeRe = /\b([A-Z][A-Z0-9]{2,3})\b\s*[=»«<>→➜➝+*\-–—~]+\s*\b([A-Z][A-Z0-9]{2,3})\b/;
   const swapRe = /CREW\s*SWAP/i;
 
   // Garbled time → {h,m,min}. "0543"→05:43, "10450"→1045, "800"→0800.
@@ -10188,6 +10191,38 @@ function parseCrewScheduleOcr(text) {
   }
   if (routeAt.length === 0) return null;
 
+  // ICAO repair: gather every full 4-char endpoint seen anywhere in this trip so a
+  // 3-char OCR-truncated code (e.g. "SVM") can be healed to the 4-char version that
+  // appears elsewhere ("SVMI") and shares its first 3 chars. Among candidates, prefer
+  // one that's a known ICAO. Returns {icao, ok} — ok:false means it couldn't be
+  // repaired (kept as-is and flagged for the user to fix on Edit).
+  const fourCharCodes = new Set();
+  for (const i of routeAt) {
+    const m = lines[i].match(routeRe);
+    if (m) {
+      if (m[1].length === 4) fourCharCodes.add(m[1].toUpperCase());
+      if (m[2].length === 4) fourCharCodes.add(m[2].toUpperCase());
+    }
+  }
+  function repairIcao(code) {
+    if (code.length >= 4) return {
+      icao: code,
+      ok: true
+    };
+    const cands = [...fourCharCodes].filter(c => c.length === 4 && c.slice(0, 3) === code);
+    if (cands.length) {
+      const known = cands.find(c => ICAO_IANA[c] !== undefined);
+      return {
+        icao: known || cands[0],
+        ok: true
+      };
+    }
+    return {
+      icao: code,
+      ok: false
+    };
+  }
+
   // Pass 2: every route claims its OWN time line. For each route, scan forward up to
   // 3 lines (but never past the next route line) for the FIRST line that carries two
   // valid times and has not already been consumed by an earlier route. Intervening
@@ -10199,8 +10234,11 @@ function parseCrewScheduleOcr(text) {
   for (let r = 0; r < routeAt.length; r++) {
     const i = routeAt[r];
     const rm = lines[i].match(routeRe);
-    const origin = rm[1].toUpperCase(),
-      dest = rm[2].toUpperCase();
+    const rep1 = repairIcao(rm[1].toUpperCase()),
+      rep2 = repairIcao(rm[2].toUpperCase());
+    const origin = rep1.icao,
+      dest = rep2.icao;
+    const needsIcaoFix = !rep1.ok || !rep2.ok;
     const nextRoute = r + 1 < routeAt.length ? routeAt[r + 1] : lines.length;
     const limit = Math.min(i + 3, nextRoute - 1, lines.length - 1);
     let dep = null,
@@ -10229,6 +10267,7 @@ function parseCrewScheduleOcr(text) {
         hasRest: false,
         restMins: null,
         needsTimes: true,
+        needsIcaoFix,
         date: curDate ? {
           ...curDate
         } : null,
@@ -10258,6 +10297,7 @@ function parseCrewScheduleOcr(text) {
       flightMins,
       hasRest: false,
       restMins: null,
+      needsIcaoFix,
       date: curDate ? {
         ...curDate
       } : null,
@@ -11577,7 +11617,8 @@ function FlightDutyCalc() {
       style: {
         ...icaoInputStyle,
         flex: "1 1 56px",
-        minWidth: 56
+        minWidth: 56,
+        borderColor: ml.origin && ml.origin.length < 4 ? C.red : C.border
       }
     }), /*#__PURE__*/React.createElement("span", {
       style: {
@@ -11594,7 +11635,8 @@ function FlightDutyCalc() {
       style: {
         ...icaoInputStyle,
         flex: "1 1 56px",
-        minWidth: 56
+        minWidth: 56,
+        borderColor: ml.dest && ml.dest.length < 4 ? C.red : C.border
       }
     }), /*#__PURE__*/React.createElement("div", {
       style: {
@@ -12159,7 +12201,7 @@ function FlightDutyCalc() {
     }
   }, "L", i + 1), /*#__PURE__*/React.createElement("span", {
     style: {
-      color: C.text,
+      color: leg.needsIcaoFix ? C.red : C.text,
       fontWeight: 700
     }
   }, leg.origin, "\u2192", leg.dest), leg.needsTimes ? /*#__PURE__*/React.createElement("span", {
@@ -12175,7 +12217,16 @@ function FlightDutyCalc() {
     style: {
       color: C.gold
     }
-  }, fmtHM(leg.flightMins))), leg.needsTimes && /*#__PURE__*/React.createElement("span", {
+  }, fmtHM(leg.flightMins))), leg.needsIcaoFix && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 9,
+      background: C.red + "22",
+      color: C.red,
+      padding: "2px 6px",
+      borderRadius: 4,
+      fontWeight: 700
+    }
+  }, "FIX ICAO"), leg.needsTimes && /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 9,
       background: C.gold + "22",
