@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.40";
+const APP_VERSION="1.41";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2764,7 +2764,7 @@ function FlightDutyCalc(){
   const[crewMode,setCrewMode]=useState(2);
   const[crewOverrides,setCrewOverrides]=useState({}); // { [dpIndex]: crewMode } — per-duty-period crew config
   const[dutyInputMode,setDutyInputMode]=useState("import"); // "import" or "manual"
-  const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:"",mode:"Z"}]);
+  const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:"",mode:"Z",crewMode:2}]);
   const[pasteText,setPasteText]=useState("");
   const[parseError,setParseError]=useState("");
   const[parsed,setParsed]=useState(null);
@@ -3015,7 +3015,7 @@ function FlightDutyCalc(){
     setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
   }
 
-  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:ls[ls.length-1]?.date||"",mode:ls[ls.length-1]?.mode||"Z"}]);}
+  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:ls[ls.length-1]?.date||"",mode:ls[ls.length-1]?.mode||"Z",crewMode:ls[ls.length-1]?.crewMode||crewMode}]);}
   function removeManualLeg(i){setManualLegs(ls=>ls.length<=1?ls:ls.filter((_,j)=>j!==i));}
 
   // Look up an airport's UTC offset from ICAO_TZ (or sessionTz override).
@@ -3119,7 +3119,7 @@ function FlightDutyCalc(){
           date={day:Number(dp[2]),month:monthNames[Number(dp[1])],year2:Number(dp[0].slice(-2))};
         }
       }
-      legs.push({origin:ml.origin.toUpperCase(),dest:ml.dest.toUpperCase(),depH,depM,arrH,arrM,flightMins,hasRest:false,restMins:null,date});
+      legs.push({origin:ml.origin.toUpperCase(),dest:ml.dest.toUpperCase(),depH,depM,arrH,arrM,flightMins,hasRest:false,restMins:null,date,crewMode:ml.crewMode||crewMode,isLocal:ml.mode==="L"});
     }
     if(legs.length===0)return;
     setParseError("");
@@ -3142,7 +3142,13 @@ function FlightDutyCalc(){
     if(!legs[0].date){setParseError("Enter the start date for leg 1.");return;}
     const resolved=resolveLegTimes(legs);
     const periods=groupDutyPeriods(resolved);
-    const analysis=computeDutyAnalysis(periods,crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets,crewOverrides);
+    // Manual entry sets a per-leg crewMode; the first leg of each duty period
+    // defines that period's crew config. Import legs have no crewMode → fall back
+    // to the global default via crewOverrides.
+    const derivedOverrides={...crewOverrides};
+    periods.forEach((p,pi)=>{if(p.legs[0]&&p.legs[0].crewMode)derivedOverrides[pi]=p.legs[0].crewMode;});
+    setCrewOverrides(derivedOverrides);
+    const analysis=computeDutyAnalysis(periods,crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets,derivedOverrides);
     setResult(analysis);
   }
 
@@ -3176,10 +3182,14 @@ function FlightDutyCalc(){
         const mi=monthNames.indexOf(l.date.month);
         if(mi>0)dateStr="20"+String(l.date.year2).padStart(2,"0")+"-"+String(mi).padStart(2,"0")+"-"+String(l.date.day).padStart(2,"0");
       }
-      // Parsed times are canonical UTC, so open the editor in Z (Zulu) mode and
-      // mirror them into the visible input buffers (depInput/arrInput) — the time
-      // fields render those, not depTime/arrTime.
-      return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput:depT,arrInput:arrT,date:dateStr,mode:"Z"};
+      // Parsed times are canonical UTC. Restore the leg's original Z/L mode if it
+      // was manually entered (l.isLocal); OCR/paste legs default to Z. In L mode the
+      // visible buffers (depInput/arrInput) must show local time, derived from UTC.
+      const isLocal=l.isLocal===true;
+      const mode=isLocal?"L":"Z";
+      const depInput=isLocal?localFromUtc(depT,tzOffsetFor(l.origin)||0):depT;
+      const arrInput=isLocal?localFromUtc(arrT,tzOffsetFor(l.dest)||0):arrT;
+      return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode};
     });
     setManualLegs(mLegs);
     setDutyInputMode("manual");
@@ -3208,6 +3218,11 @@ function FlightDutyCalc(){
       {manualLegs.map((ml,i)=>{
         const lc=dutyLegColor(i);
         const mode=ml.mode||"Z",isL=mode==="L";
+        const legCrew=ml.crewMode||crewMode;
+        // Live flight time from canonical UTC buffers (kept current as the user types).
+        const depMin=hhmmToMin(ml.depTime||""),arrMin=hhmmToMin(ml.arrTime||"");
+        let ftMin=null;
+        if(depMin!==null&&arrMin!==null){ftMin=arrMin-depMin;if(ftMin<0)ftMin+=1440;}
         const modeColor=isL?C.amber:C.accent;
         const depUnknown=isL&&ml.origin&&tzOffsetFor(ml.origin)===null;
         const arrUnknown=isL&&ml.dest&&tzOffsetFor(ml.dest)===null;
@@ -3244,6 +3259,17 @@ function FlightDutyCalc(){
                 {arrUnknown&&<span title="Unknown ICAO — treated as UTC+0" style={{color:C.amber,fontWeight:800}}>?</span>}
               </div>
               <input value={ml.arrInput||""} onChange={e=>setManualLegTime(i,"arr",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputStyle}/>
+            </div>
+          </div>
+          {/* Live flight time — appears once both times are valid */}
+          {ftMin!==null&&<div style={{display:"flex",justifyContent:"flex-end",marginTop:6}}>
+            <span style={{background:C.gold+"1f",color:C.gold,borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800,letterSpacing:.3}}>✈ {fmtHM(ftMin)}</span>
+          </div>}
+          {/* Row 3: per-leg crew config */}
+          <div style={{marginTop:8}}>
+            <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Crew</div>
+            <div style={{display:"flex",gap:0,background:C.card,borderRadius:7,padding:2,border:"1px solid "+C.border}}>
+              {[2,3,4].map(n=>(<button key={n} onClick={()=>updateManualLeg(i,"crewMode",n)} style={{flex:1,padding:"5px 4px",borderRadius:5,border:"none",background:legCrew===n?C.accent+"22":"transparent",color:legCrew===n?C.accent:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
             </div>
           </div>
         </div>);
