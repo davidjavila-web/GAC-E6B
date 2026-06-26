@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.47";
+const APP_VERSION="1.48";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -121,6 +121,48 @@ const ICAO_TZ={
   // Oceania
   YSSY:10,YMML:10,NZAA:12
 };
+
+// Build a representative JS Date for a leg's calendar date so timezone offsets
+// (which vary with DST) are computed for the correct day. Accepts the internal
+// {day,month,year2} objects, the "YYYY-MM-DD" strings used by manual entry, or
+// null/undefined (falls back to today — best-effort while a leg is being edited).
+function jsDateFromLegDate(d){
+  if(d&&typeof d==="object"&&d.month!==undefined&&d.day!=null){
+    const mi=MONTHS[d.month];const y=2000+(d.year2!=null?Number(d.year2):25);
+    if(mi!==undefined&&Number.isFinite(y))return new Date(Date.UTC(y,mi,Number(d.day),12,0,0));
+  }else if(typeof d==="string"&&d){
+    const p=d.split("-");
+    if(p.length===3){const y=Number(p[0]),mo=Number(p[1])-1,da=Number(p[2]);
+      if(Number.isFinite(y)&&Number.isFinite(mo)&&Number.isFinite(da))return new Date(Date.UTC(y,mo,da,12,0,0));}
+  }
+  return new Date();
+}
+
+// DST-aware UTC offset (in hours, may be fractional) for an ICAO on a given date.
+// Primary lookup: IANA zone from ICAO_IANA (4039 airports) — DST is computed for
+// the actual `date` via Intl.DateTimeFormat. Secondary fallback: the legacy
+// fixed-offset ICAO_TZ table. Manual sessionTz numbers are layered in by callers
+// (tzOffsetFor / localStr). Returns null when the airport is unknown.
+function getIcaoOffset(icao,date){
+  const raw=ICAO_IANA[icao];
+  const sess=(typeof sessionTz!=="undefined")?sessionTz[icao]:undefined;
+  const zone=raw||sess;
+  if(zone===undefined||zone===null){
+    const fixed=ICAO_TZ[icao];
+    if(fixed!==undefined&&fixed!==null&&!isNaN(fixed))return Number(fixed);
+    return null;
+  }
+  if(typeof zone==="number")return zone; // manual sessionTz entry
+  try{
+    const dtf=new Intl.DateTimeFormat("en-US",{timeZone:zone,timeZoneName:"shortOffset",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit"});
+    const tzPart=dtf.formatToParts(date||new Date()).find(p=>p.type==="timeZoneName");
+    if(!tzPart)return null;
+    const m=tzPart.value.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+    if(!m)return 0;
+    const sign=m[1]==="-"?-1:1;
+    return sign*(parseInt(m[2],10)+(m[3]?parseInt(m[3],10)/60:0));
+  }catch(e){return null;}
+}
 
 // ── Theme palettes ─────────────────────────────────────────────────────────
 // Accent/status colors (accent/green/red/amber/gold) and `light` (text on dark
@@ -2519,10 +2561,6 @@ function parseCrewScheduleOcr(text){
     if(!Number.isFinite(h)||!Number.isFinite(m)||h>23||m>59)return null;
     return{h,m,min:h*60+m};
   }
-  // Known offset or undefined. Don't default to 0 here — a missing destination
-  // offset paired with a known departure offset would otherwise wrap the flight
-  // across midnight into an absurd duration.
-  function knownOffset(icao){const o=ICAO_TZ[icao];return(o===undefined||o===null||isNaN(o))?undefined:Number(o);}
   const toUtc=(min,off)=>(((min-off*60)%1440)+1440)%1440;
 
   // Date: month name + a nearby day number (no year in this layout).
@@ -2536,6 +2574,10 @@ function parseCrewScheduleOcr(text){
       if(nums)for(const n of nums){const nv=Number(n);if(nv>=1&&nv<=31){curDate={day:nv,month,year2:25};break;}}
     }
   }
+  // DST-aware offset for the schedule's date (ICAO_IANA primary, ICAO_TZ fallback).
+  // undefined when unknown so callers can borrow the other endpoint's offset.
+  const ocrJsDate=jsDateFromLegDate(curDate);
+  function knownOffset(icao){const v=getIcaoOffset(icao,ocrJsDate);return v===null?undefined:Number(v);}
 
   const legs=[];
   for(let i=0;i<lines.length;i++){
@@ -3000,8 +3042,8 @@ function FlightDutyCalc(){
     setNeedDate(combined.needDate);
     const unknown={};
     legs.forEach(l=>{
-      if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
-      if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
+      if(l.origin&&tzOffsetFor(l.origin,l.date)===null)unknown[l.origin]=0;
+      if(l.dest&&tzOffsetFor(l.dest,l.date)===null)unknown[l.dest]=0;
     });
     setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
     if(thumb)setThumbs(t=>[...t,thumb]);
@@ -3070,11 +3112,13 @@ function FlightDutyCalc(){
   function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:ls[ls.length-1]?.date||"",mode:ls[ls.length-1]?.mode||"Z",crewMode:ls[ls.length-1]?.crewMode||crewMode}]);}
   function removeManualLeg(i){setManualLegs(ls=>ls.length<=1?ls:ls.filter((_,j)=>j!==i));}
 
-  // Look up an airport's UTC offset from ICAO_TZ (or sessionTz override).
-  // Returns null when the ICAO is unknown so callers can branch cleanly.
-  function tzOffsetFor(icao){
+  // DST-aware UTC offset for an ICAO on a given date (string "YYYY-MM-DD" or the
+  // {day,month,year2} object). Primary: ICAO_IANA (DST for the date); secondary:
+  // legacy ICAO_TZ; final fallback: a manual sessionTz number. Null when unknown.
+  function tzOffsetFor(icao,dateRef){
     if(!icao)return null;
-    if(icao in ICAO_TZ)return ICAO_TZ[icao];
+    const off=getIcaoOffset(icao,jsDateFromLegDate(dateRef));
+    if(off!==null)return off;
     const s=sessionTz[icao];
     if(s===undefined||s===""||isNaN(s))return null;
     return Number(s);
@@ -3109,10 +3153,16 @@ function FlightDutyCalc(){
       // Mode L pins the canonical UTC moment — switching ICAOs re-derives the
       // displayed local time so the underlying depTime/arrTime stay constant.
       if(next.mode==="L"&&field==="origin"){
-        next.depInput=next.depTime?localFromUtc(next.depTime,tzOffsetFor(val)||0):"";
+        next.depInput=next.depTime?localFromUtc(next.depTime,tzOffsetFor(val,next.date)||0):"";
       }
       if(next.mode==="L"&&field==="dest"){
-        next.arrInput=next.arrTime?localFromUtc(next.arrTime,tzOffsetFor(val)||0):"";
+        next.arrInput=next.arrTime?localFromUtc(next.arrTime,tzOffsetFor(val,next.date)||0):"";
+      }
+      // Changing the date can change the DST offset → keep the displayed LOCAL
+      // time fixed and recompute the canonical UTC for the new date.
+      if(next.mode==="L"&&field==="date"){
+        if(next.depInput)next.depTime=utcFromLocal(next.depInput,tzOffsetFor(next.origin,next.date)||0);
+        if(next.arrInput)next.arrTime=utcFromLocal(next.arrInput,tzOffsetFor(next.dest,next.date)||0);
       }
       return next;
     }));
@@ -3125,8 +3175,8 @@ function FlightDutyCalc(){
       const next={...l,mode};
       if(mode==="Z"){next.depInput=next.depTime||"";next.arrInput=next.arrTime||"";}
       else{
-        next.depInput=next.depTime?localFromUtc(next.depTime,tzOffsetFor(next.origin)||0):"";
-        next.arrInput=next.arrTime?localFromUtc(next.arrTime,tzOffsetFor(next.dest)||0):"";
+        next.depInput=next.depTime?localFromUtc(next.depTime,tzOffsetFor(next.origin,next.date)||0):"";
+        next.arrInput=next.arrTime?localFromUtc(next.arrTime,tzOffsetFor(next.dest,next.date)||0):"";
       }
       return next;
     }));
@@ -3146,7 +3196,7 @@ function FlightDutyCalc(){
       if(mins===null){next[utcKey]="";return next;}
       if(next.mode==="Z"){next[utcKey]=v;}
       else{
-        const off=tzOffsetFor(side==="dep"?next.origin:next.dest)||0;
+        const off=tzOffsetFor(side==="dep"?next.origin:next.dest,next.date)||0;
         next[utcKey]=utcFromLocal(v,off);
       }
       return next;
@@ -3177,8 +3227,8 @@ function FlightDutyCalc(){
     setParseError("");
     const unknown={};
     legs.forEach(l=>{
-      if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
-      if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
+      if(l.origin&&tzOffsetFor(l.origin,l.date)===null)unknown[l.origin]=0;
+      if(l.dest&&tzOffsetFor(l.dest,l.date)===null)unknown[l.dest]=0;
     });
     setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
     setParsed({legs,needDate:!legs[0].date});
@@ -3237,8 +3287,8 @@ function FlightDutyCalc(){
       // visible buffers (depInput/arrInput) must show local time, derived from UTC.
       const isLocal=l.isLocal===true;
       const mode=isLocal?"L":"Z";
-      const depInput=isLocal?localFromUtc(depT,tzOffsetFor(l.origin)||0):depT;
-      const arrInput=isLocal?localFromUtc(arrT,tzOffsetFor(l.dest)||0):arrT;
+      const depInput=isLocal?localFromUtc(depT,tzOffsetFor(l.origin,l.date)||0):depT;
+      const arrInput=isLocal?localFromUtc(arrT,tzOffsetFor(l.dest,l.date)||0):arrT;
       return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode};
     });
     setManualLegs(mLegs);
@@ -3279,8 +3329,8 @@ function FlightDutyCalc(){
         let ftMin=null;
         if(depMin!==null&&arrMin!==null){ftMin=arrMin-depMin;if(ftMin<0)ftMin+=1440;}
         const modeColor=isL?C.amber:C.accent;
-        const depUnknown=isL&&ml.origin&&tzOffsetFor(ml.origin)===null;
-        const arrUnknown=isL&&ml.dest&&tzOffsetFor(ml.dest)===null;
+        const depUnknown=isL&&ml.origin&&tzOffsetFor(ml.origin,ml.date)===null;
+        const arrUnknown=isL&&ml.dest&&tzOffsetFor(ml.dest,ml.date)===null;
         const timeBorderColor=isL?C.amber:C.border;
         const timeInputStyle={width:"100%",background:C.card,border:"1.5px solid "+timeBorderColor,borderRadius:8,padding:"9px 8px",color:C.text,fontSize:16,fontWeight:700,textAlign:"center",letterSpacing:1,boxSizing:"border-box"};
         const icaoInputStyle={width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 6px",color:C.text,fontSize:14,fontWeight:700,textAlign:"center",textTransform:"uppercase",letterSpacing:1,boxSizing:"border-box"};
@@ -3615,9 +3665,11 @@ function FlightDutyCalc(){
         const sumLim=mixedCrew?null:(result.dutyResults[0]?result.dutyResults[0].limits:lim);
         const pad=n=>String(n).padStart(2,"0");
         const utcStr=(h,m)=>`${pad(h)}:${pad(m)}`;
-        const localStr=(h,m,icao)=>{
-          const tz=ICAO_TZ[icao];const sTz=sessionTz[icao];
-          const offset=tz!==undefined?tz:(sTz!==undefined&&sTz!==""&&!isNaN(sTz)?Number(sTz):null);
+        const localStr=(h,m,icao,dObj)=>{
+          // DST-aware: offset computed for the leg's actual date (ICAO_IANA), then
+          // legacy ICAO_TZ, then a manual sessionTz number.
+          let offset=getIcaoOffset(icao,jsDateFromLegDate(dObj));
+          if(offset===null){const sTz=sessionTz[icao];offset=(sTz!==undefined&&sTz!==""&&!isNaN(sTz))?Number(sTz):null;}
           if(offset===null)return null;
           const total=((h*60+m)+offset*60+1440*7)%1440;
           return`${pad(Math.floor(total/60))}:${pad(total%60)}`;
@@ -3689,8 +3741,8 @@ function FlightDutyCalc(){
                   {/* Route cards */}
                   <div style={{padding:"10px 12px"}}>
                     {dp.legs.map((leg,li)=>{
-                      const dl=localStr(leg.depH,leg.depM,leg.origin);
-                      const al=localStr(leg.arrH,leg.arrM,leg.dest);
+                      const dl=localStr(leg.depH,leg.depM,leg.origin,leg.date);
+                      const al=localStr(leg.arrH,leg.arrM,leg.dest,leg.date);
                       const globalIdx=result.allLegs.findIndex(a=>a.depEpoch===leg.depEpoch&&a.origin===leg.origin&&a.dest===leg.dest);
                       const lc=dutyLegColor(globalIdx>=0?globalIdx:li);
                       return(<div key={li} style={{background:C.bg,border:"1px solid "+C.border,borderLeft:"3px solid "+lc,borderRadius:10,padding:"10px 12px",marginBottom:li<dp.legs.length-1?8:0}}>

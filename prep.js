@@ -30,6 +30,14 @@ if (code === beforeExport) {
   console.warn("prep.js: no `export default` found to strip — continuing.");
 }
 
+// Inject the ICAO→IANA timezone database inline so the built single-file HTML
+// carries the `ICAO_IANA` constant as a top-level global (referenced by
+// getIcaoOffset in the source). Prepended ahead of the component code.
+const IANA_PATH = path.join(__dirname, "icao_iana.js");
+const ianaCode = fs.readFileSync(IANA_PATH, "utf8");
+code = ianaCode.replace(/\s*$/, "") + "\n\n" + code;
+console.log(`prep.js: injected ICAO_IANA from icao_iana.js (${ianaCode.length.toLocaleString()} bytes).`);
+
 // Make sure the file ends with a newline before we append the render call.
 if (!code.endsWith("\n")) code += "\n";
 
