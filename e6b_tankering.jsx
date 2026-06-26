@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.42";
+const APP_VERSION="1.43";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3389,22 +3389,6 @@ function FlightDutyCalc(){
         <button onClick={runCalc} style={{flex:2,padding:14,borderRadius:12,background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",border:"none",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",letterSpacing:.3}}>Calculate →</button>
       </div>
     </div>}
-
-    {/* Crew mode toggle */}
-    <div style={{background:C.card,border:"1px solid "+C.border,borderRadius:12,padding:14,marginBottom:14}}>
-      <div style={{fontSize:11,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:.8,marginBottom:10}}>Crew Configuration</div>
-      <div style={{display:"flex",gap:0,background:C.bg,borderRadius:10,padding:3,border:"1px solid "+C.border}}>
-        {[2,3,4].map(n=>(<button key={n} onClick={()=>{setCrewMode(n);setCrewOverrides({});if(result)recomputeWith({},n);}} style={{flex:1,padding:"10px 6px",borderRadius:8,border:"none",background:crewMode===n?C.accent+"22":"transparent",color:crewMode===n?C.accent:C.muted,fontSize:13,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
-      </div>
-      <div style={{fontSize:10,color:C.muted,marginTop:8,lineHeight:1.4}}>Sets the default for all duty periods. Each period can be changed individually in the results below.</div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,marginTop:10}}>
-        {[{l:"Duty",v:limits.duty+"h"},{l:"Flight",v:limits.flight+"h"},{l:"Rest",v:limits.rest+"h"},{l:"24hr",v:limits.rolling24+"h"}].map(({l,v})=>(
-          <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 4px",textAlign:"center"}}>
-            <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4}}>{l}</div>
-            <div style={{fontSize:14,fontWeight:800,color:C.text,marginTop:2}}>{v}</div>
-          </div>))}
-      </div>
-    </div>
 
     {/* Duty on/off defaults */}
     <div style={{background:C.card,border:"1px solid "+C.border,borderRadius:12,padding:14,marginBottom:14}}>

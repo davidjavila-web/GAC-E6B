@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.42";
+const APP_VERSION = "1.43";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -7952,101 +7952,6 @@ function FlightDutyCalc() {
       letterSpacing: .3
     }
   }, "Calculate \u2192"))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: C.card,
-      border: "1px solid " + C.border,
-      borderRadius: 12,
-      padding: 14,
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontWeight: 700,
-      color: C.sub,
-      textTransform: "uppercase",
-      letterSpacing: .8,
-      marginBottom: 10
-    }
-  }, "Crew Configuration"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 0,
-      background: C.bg,
-      borderRadius: 10,
-      padding: 3,
-      border: "1px solid " + C.border
-    }
-  }, [2, 3, 4].map(n => /*#__PURE__*/React.createElement("button", {
-    key: n,
-    onClick: () => {
-      setCrewMode(n);
-      setCrewOverrides({});
-      if (result) recomputeWith({}, n);
-    },
-    style: {
-      flex: 1,
-      padding: "10px 6px",
-      borderRadius: 8,
-      border: "none",
-      background: crewMode === n ? C.accent + "22" : "transparent",
-      color: crewMode === n ? C.accent : C.muted,
-      fontSize: 13,
-      fontWeight: 700,
-      cursor: "pointer"
-    }
-  }, n, " Pilot"))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10,
-      color: C.muted,
-      marginTop: 8,
-      lineHeight: 1.4
-    }
-  }, "Sets the default for all duty periods. Each period can be changed individually in the results below."), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(4,1fr)",
-      gap: 6,
-      marginTop: 10
-    }
-  }, [{
-    l: "Duty",
-    v: limits.duty + "h"
-  }, {
-    l: "Flight",
-    v: limits.flight + "h"
-  }, {
-    l: "Rest",
-    v: limits.rest + "h"
-  }, {
-    l: "24hr",
-    v: limits.rolling24 + "h"
-  }].map(({
-    l,
-    v
-  }) => /*#__PURE__*/React.createElement("div", {
-    key: l,
-    style: {
-      background: C.bg,
-      borderRadius: 8,
-      padding: "8px 4px",
-      textAlign: "center"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 9,
-      color: C.muted,
-      textTransform: "uppercase",
-      letterSpacing: .4
-    }
-  }, l), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 14,
-      fontWeight: 800,
-      color: C.text,
-      marginTop: 2
-    }
-  }, v))))), /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.card,
       border: "1px solid " + C.border,
