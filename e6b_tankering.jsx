@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.46";
+const APP_VERSION="1.47";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3384,7 +3384,7 @@ function FlightDutyCalc(){
         <div style={{fontSize:13,fontWeight:700,color:C.text}}>📋 Screenshot Captured</div>
         <button onClick={()=>setPastedImg(null)} style={{background:"transparent",border:"none",color:C.muted,fontSize:16,cursor:"pointer",padding:"2px 6px"}}>✕</button>
       </div>
-      <img src={pastedImg} alt="Pasted screenshot" onClick={()=>setZoomImg(pastedImg)} style={{maxHeight:120,maxWidth:"100%",height:"auto",borderRadius:8,border:"1px solid "+C.border,marginBottom:10,cursor:"zoom-in",display:"block"}}/>
+      <img src={pastedImg} alt="Pasted screenshot" onClick={()=>setZoomImg(pastedImg)} style={{maxHeight:200,maxWidth:"100%",height:"auto",borderRadius:8,border:"1px solid "+C.border,marginBottom:10,cursor:"zoom-in",display:"block"}}/>
       <button onClick={handleOcrRead} disabled={ocrBusy||importing||!ocrReady}
         style={{width:"100%",padding:14,borderRadius:12,
           background:(ocrReady&&!ocrBusy)?"linear-gradient(135deg,"+C.accent+",#2a5f85)":C.panel,
@@ -3404,11 +3404,11 @@ function FlightDutyCalc(){
         <button onClick={clearImport} style={{background:"transparent",border:"none",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer",padding:"2px 4px"}}>Clear All</button>
       </div>
       {/* Imported screenshot thumbnails (tap to enlarge) */}
-      {thumbs.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12,paddingBottom:10,borderBottom:"1px solid "+C.border}}>
+      {thumbs.length>0&&<div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12,paddingBottom:10,borderBottom:"1px solid "+C.border}}>
         {thumbs.map((t,ti)=>(
           <div key={ti} style={{position:"relative"}}>
-            <img src={t} alt={"Screenshot "+(ti+1)} onClick={()=>setZoomImg(t)} style={{height:84,width:"auto",maxWidth:120,borderRadius:6,border:"1px solid "+C.border,cursor:"zoom-in",display:"block",objectFit:"cover"}}/>
-            <span style={{position:"absolute",top:3,left:3,background:C.accent,color:"#fff",fontSize:8,fontWeight:800,borderRadius:3,padding:"1px 5px"}}>{ti+1}</span>
+            <img src={t} alt={"Screenshot "+(ti+1)} onClick={()=>setZoomImg(t)} style={{height:190,width:"auto",maxWidth:"100%",borderRadius:8,border:"1px solid "+C.border,cursor:"zoom-in",display:"block"}}/>
+            <span style={{position:"absolute",top:4,left:4,background:C.accent,color:"#fff",fontSize:10,fontWeight:800,borderRadius:4,padding:"2px 7px"}}>{ti+1}</span>
           </div>))}
       </div>}
       {parsed.legs.map((leg,i)=>(
@@ -3422,6 +3422,15 @@ function FlightDutyCalc(){
           {leg.needsTimes&&<span style={{fontSize:9,background:C.gold+"22",color:C.gold,padding:"2px 6px",borderRadius:4,fontWeight:700}}>TAP EDIT</span>}
           {leg.hasRest&&<span style={{fontSize:9,background:C.green+"22",color:C.green,padding:"2px 6px",borderRadius:4,fontWeight:700}}>REST</span>}
         </div>))}
+
+      {/* Add another single-column screenshot — its legs append to the list above.
+          Prominent and placed right below the leg list so the multi-shot flow is obvious. */}
+      {!addingMore&&dutyInputMode==="import"&&<button onClick={addAnotherScreenshot} style={{width:"100%",marginTop:14,padding:14,borderRadius:12,background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",border:"none",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",letterSpacing:.3}}>
+        ＋ Add Another Screenshot
+      </button>}
+      {addingMore&&<div style={{marginTop:14,padding:"10px 12px",borderRadius:10,background:C.accent+"12",border:"1.5px dashed "+C.accent+"66",fontSize:12,color:C.accent,fontWeight:700,textAlign:"center"}}>
+        ⬆️ Capture or paste the next screenshot above, then tap Read Screenshot
+      </div>}
 
       {needDate&&<div style={{marginTop:12,background:C.bg,borderRadius:10,padding:14,border:"1.5px solid "+C.gold+"44"}}>
         <div style={{fontSize:11,color:C.gold,fontWeight:700,marginBottom:8}}>Enter start date for first leg</div>
@@ -3448,12 +3457,7 @@ function FlightDutyCalc(){
 
       {parseError&&<div style={{fontSize:12,color:C.red,fontWeight:600,marginTop:8}}>{parseError}</div>}
 
-      {/* Add another single-column screenshot — its legs append to the list above */}
-      {!addingMore&&dutyInputMode==="import"&&<button onClick={addAnotherScreenshot} style={{width:"100%",marginTop:14,padding:13,borderRadius:12,background:C.accent+"12",border:"1.5px dashed "+C.accent+"66",color:C.accent,fontSize:14,fontWeight:800,cursor:"pointer"}}>
-        ➕ Add Another Screenshot
-      </button>}
-
-      <div style={{display:"flex",gap:10,marginTop:10}}>
+      <div style={{display:"flex",gap:10,marginTop:14}}>
         <button onClick={clearImport} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.border,color:C.muted,fontSize:14,fontWeight:700,cursor:"pointer"}}>Re-paste</button>
         <button onClick={editLegs} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.accent+"44",color:C.accent,fontSize:14,fontWeight:700,cursor:"pointer"}}>✏️ Edit</button>
         <button onClick={runCalc} style={{flex:2,padding:14,borderRadius:12,background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",border:"none",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",letterSpacing:.3}}>Calculate →</button>

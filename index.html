@@ -16,7 +16,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.46";
+const APP_VERSION = "1.47";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -7808,7 +7808,7 @@ function FlightDutyCalc() {
     alt: "Pasted screenshot",
     onClick: () => setZoomImg(pastedImg),
     style: {
-      maxHeight: 120,
+      maxHeight: 200,
       maxWidth: "100%",
       height: "auto",
       borderRadius: 8,
@@ -7875,7 +7875,7 @@ function FlightDutyCalc() {
   }, "Clear All")), thumbs.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      gap: 6,
+      gap: 8,
       flexWrap: "wrap",
       marginBottom: 12,
       paddingBottom: 10,
@@ -7891,26 +7891,25 @@ function FlightDutyCalc() {
     alt: "Screenshot " + (ti + 1),
     onClick: () => setZoomImg(t),
     style: {
-      height: 84,
+      height: 190,
       width: "auto",
-      maxWidth: 120,
-      borderRadius: 6,
+      maxWidth: "100%",
+      borderRadius: 8,
       border: "1px solid " + C.border,
       cursor: "zoom-in",
-      display: "block",
-      objectFit: "cover"
+      display: "block"
     }
   }), /*#__PURE__*/React.createElement("span", {
     style: {
       position: "absolute",
-      top: 3,
-      left: 3,
+      top: 4,
+      left: 4,
       background: C.accent,
       color: "#fff",
-      fontSize: 8,
+      fontSize: 10,
       fontWeight: 800,
-      borderRadius: 3,
-      padding: "1px 5px"
+      borderRadius: 4,
+      padding: "2px 7px"
     }
   }, ti + 1)))), parsed.legs.map((leg, i) => /*#__PURE__*/React.createElement("div", {
     key: i,
@@ -7964,7 +7963,34 @@ function FlightDutyCalc() {
       borderRadius: 4,
       fontWeight: 700
     }
-  }, "REST"))), needDate && /*#__PURE__*/React.createElement("div", {
+  }, "REST"))), !addingMore && dutyInputMode === "import" && /*#__PURE__*/React.createElement("button", {
+    onClick: addAnotherScreenshot,
+    style: {
+      width: "100%",
+      marginTop: 14,
+      padding: 14,
+      borderRadius: 12,
+      background: "linear-gradient(135deg," + C.accent + ",#2a5f85)",
+      border: "none",
+      color: "#fff",
+      fontSize: 15,
+      fontWeight: 800,
+      cursor: "pointer",
+      letterSpacing: .3
+    }
+  }, "\uFF0B Add Another Screenshot"), addingMore && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 14,
+      padding: "10px 12px",
+      borderRadius: 10,
+      background: C.accent + "12",
+      border: "1.5px dashed " + C.accent + "66",
+      fontSize: 12,
+      color: C.accent,
+      fontWeight: 700,
+      textAlign: "center"
+    }
+  }, "\u2B06\uFE0F Capture or paste the next screenshot above, then tap Read Screenshot"), needDate && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 12,
       background: C.bg,
@@ -8108,25 +8134,11 @@ function FlightDutyCalc() {
       fontWeight: 600,
       marginTop: 8
     }
-  }, parseError), !addingMore && dutyInputMode === "import" && /*#__PURE__*/React.createElement("button", {
-    onClick: addAnotherScreenshot,
-    style: {
-      width: "100%",
-      marginTop: 14,
-      padding: 13,
-      borderRadius: 12,
-      background: C.accent + "12",
-      border: "1.5px dashed " + C.accent + "66",
-      color: C.accent,
-      fontSize: 14,
-      fontWeight: 800,
-      cursor: "pointer"
-    }
-  }, "\u2795 Add Another Screenshot"), /*#__PURE__*/React.createElement("div", {
+  }, parseError), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
-      marginTop: 10
+      marginTop: 14
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: clearImport,
