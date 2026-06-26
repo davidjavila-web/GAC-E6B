@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.45";
+const APP_VERSION="1.46";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2863,14 +2863,10 @@ function FlightDutyCalc(){
       setImportMsg("Parsing trip data...");
       const p=parseDutyTrip(text);
       if(p&&p.legs&&p.legs.length>0){
-        setParsed(p);setNeedDate(p.needDate);setPasteText(text);setPastedImg(null);
-        const unknown={};
-        p.legs.forEach(l=>{
-          if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
-          if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
-        });
-        setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
-        setImportMsg("✅ "+p.legs.length+" legs read from screenshot");
+        const thumb=pastedImg;
+        ingestParsed(p,thumb);
+        setPastedImg(null);
+        setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
         setTimeout(()=>setImportMsg(""),4000);
       }else{
         // Couldn't auto-parse — dump OCR text into textarea for manual review
@@ -2926,14 +2922,8 @@ function FlightDutyCalc(){
       // Try to parse the extracted text
       const p=parseDutyTrip(allText);
       if(p&&p.legs&&p.legs.length>0){
-        setParsed(p);setNeedDate(p.needDate);setPasteText(allText);
-        const unknown={};
-        p.legs.forEach(l=>{
-          if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
-          if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
-        });
-        setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
-        setImportMsg("✅ "+p.legs.length+" legs extracted from PDF");
+        ingestParsed(p);
+        setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
         setTimeout(()=>setImportMsg(""),4000);
       }else{
         // Couldn't auto-parse, but put the text in the textarea for manual editing
@@ -2965,14 +2955,8 @@ function FlightDutyCalc(){
       setImportMsg("Parsing trip data...");
       const p=parseDutyTrip(text);
       if(p&&p.legs&&p.legs.length>0){
-        setParsed(p);setNeedDate(p.needDate);setPasteText(text);
-        const unknown={};
-        p.legs.forEach(l=>{
-          if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
-          if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
-        });
-        setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
-        setImportMsg("✅ "+p.legs.length+" legs read from image");
+        ingestParsed(p,dataUrl);
+        setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
         setTimeout(()=>setImportMsg(""),4000);
       }else{
         // Couldn't auto-parse — put OCR text in textarea for manual review
@@ -2993,6 +2977,39 @@ function FlightDutyCalc(){
 
   const[pastedImg,setPastedImg]=useState(null);
   const pasteBoxRef=useRef();
+  // Multiple-screenshot import: legs accumulate across imports; thumbs holds one
+  // small preview per imported screenshot; addingMore re-opens the import card while
+  // keeping the accumulated legs; zoomImg shows a tapped thumbnail full-screen.
+  const[thumbs,setThumbs]=useState([]);
+  const[addingMore,setAddingMore]=useState(false);
+  const[zoomImg,setZoomImg]=useState(null);
+  // Ref mirror of `parsed` so back-to-back ingests read the freshest leg list.
+  const parsedRef=useRef(null);
+  useEffect(()=>{parsedRef.current=parsed;},[parsed]);
+
+  // Append a freshly-parsed result's legs to the accumulated list (instead of
+  // replacing). Recomputes needDate/unknown ICAOs over the COMBINED list. `thumb`
+  // (a screenshot data URL) is recorded for the thumbnail row when present.
+  function ingestParsed(p,thumb){
+    if(!p||!p.legs||!p.legs.length)return false;
+    const base=(parsedRef.current&&parsedRef.current.legs)?parsedRef.current.legs:[];
+    const legs=[...base,...p.legs];
+    const combined={legs,needDate:!legs[0].date};
+    parsedRef.current=combined;
+    setParsed(combined);
+    setNeedDate(combined.needDate);
+    const unknown={};
+    legs.forEach(l=>{
+      if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
+      if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
+    });
+    setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
+    if(thumb)setThumbs(t=>[...t,thumb]);
+    setAddingMore(false);setPasteText("");
+    return true;
+  }
+  function clearImport(){setParsed(null);parsedRef.current=null;setNeedDate(false);setUnknownIcaos({});setCrewOverrides({});setThumbs([]);setPastedImg(null);setPasteText("");setAddingMore(false);setParseError("");setResult(null);}
+  function addAnotherScreenshot(){setAddingMore(true);setPasteText("");setParseError("");setPastedImg(null);}
 
   // Handle paste into the contentEditable paste box
   function handlePasteFromBox(e){
@@ -3047,13 +3064,7 @@ function FlightDutyCalc(){
     if(!pasteText.trim()){setParseError("Paste your trip schedule above.");return;}
     const p=parseDutyTrip(pasteText);
     if(!p||!p.legs||p.legs.length===0){setParseError("No legs found. Check the format — paste from ARINCDirect.");return;}
-    setParsed(p);setNeedDate(p.needDate);
-    const unknown={};
-    p.legs.forEach(l=>{
-      if(l.origin&&!(l.origin in ICAO_TZ)&&!(l.origin in sessionTz))unknown[l.origin]=0;
-      if(l.dest&&!(l.dest in ICAO_TZ)&&!(l.dest in sessionTz))unknown[l.dest]=0;
-    });
-    setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
+    ingestParsed(p);
   }
 
   function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:ls[ls.length-1]?.date||"",mode:ls[ls.length-1]?.mode||"Z",crewMode:ls[ls.length-1]?.crewMode||crewMode}]);}
@@ -3208,7 +3219,7 @@ function FlightDutyCalc(){
   function handleOffsetChange(pi,field,val){setCustomOffsets(prev=>({...prev,[pi]:{...(prev[pi]||{on:Number(dutyOnDef)||0,off:Number(dutyOffDef)||0}),[field]:Number(val)}}));}
   function statusColor(s){return s==="red"?C.red:s==="amber"?C.gold:C.green;}
   function statusLabel(s){return s==="red"?"EXCEEDED":s==="amber"?"CAUTION":"OK";}
-  function resetAll(){setParsed(null);setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);}
+  function resetAll(){setParsed(null);parsedRef.current=null;setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);setThumbs([]);setAddingMore(false);}
 
   function editLegs(){
     if(!parsed)return;
@@ -3232,7 +3243,8 @@ function FlightDutyCalc(){
     });
     setManualLegs(mLegs);
     setDutyInputMode("manual");
-    setParsed(null);
+    setParsed(null);parsedRef.current=null;
+    setThumbs([]);setAddingMore(false);
     setResult(null);
     setParseError("");
     setShowExplain(false);
@@ -3242,6 +3254,10 @@ function FlightDutyCalc(){
     <input ref={imgRef} type="file" accept="image/png,image/jpeg,image/jpg,image/heic,image/heif,image/webp,image/*" style={{display:"none"}} onChange={handleImageImport}/>
     <input ref={camRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handleImageImport}/>
     <input ref={pdfRef} type="file" accept=".pdf,application/pdf" style={{display:"none"}} onChange={handlePdfImport}/>
+    {/* Tapped-thumbnail full-screen viewer */}
+    {zoomImg&&<div onClick={()=>setZoomImg(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.88)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:16,cursor:"zoom-out"}}>
+      <img src={zoomImg} alt="Screenshot" style={{maxWidth:"100%",maxHeight:"100%",borderRadius:8,boxShadow:"0 8px 40px rgba(0,0,0,0.6)"}}/>
+    </div>}
 
     {/* ── MODE TOGGLE ── */}
     {!result&&!parsed&&<div style={{display:"flex",gap:0,background:C.bg,borderRadius:10,padding:3,border:"1px solid "+C.border,marginBottom:14}}>
@@ -3320,11 +3336,12 @@ function FlightDutyCalc(){
     </div>}
 
     {/* ── PASTE INPUT (top, always visible when no results) ── */}
-    {!result&&!parsed&&dutyInputMode==="import"&&<div style={{background:C.card,border:"1.5px solid "+C.accent+"55",borderRadius:12,padding:16,marginBottom:14}}>
+    {!result&&dutyInputMode==="import"&&(!parsed||addingMore)&&<div style={{background:C.card,border:"1.5px solid "+C.accent+"55",borderRadius:12,padding:16,marginBottom:14}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-        <div style={{fontSize:13,fontWeight:700,color:C.text}}>📋 Paste Trip Schedule</div>
-        <div style={{fontSize:10,color:C.muted}}>ARINCDirect format</div>
+        <div style={{fontSize:13,fontWeight:700,color:C.text}}>📋 {addingMore?"Add Another Screenshot":"Paste Trip Schedule"}</div>
+        {addingMore?<button onClick={()=>{setAddingMore(false);setPastedImg(null);setPasteText("");}} style={{background:"transparent",border:"none",color:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>Done ✕</button>:<div style={{fontSize:10,color:C.muted}}>ARINCDirect format</div>}
       </div>
+      {addingMore&&parsedRef.current&&<div style={{fontSize:11,color:C.accent,fontWeight:600,marginBottom:10}}>{parsedRef.current.legs.length} leg{parsedRef.current.legs.length>1?"s":""} so far — paste the next column/day below.</div>}
       <textarea value={pasteText} onChange={e=>setPasteText(e.target.value)}
         placeholder={"Tap here and paste your trip text from ARINCDirect\n\n21:00\nMMTO\n\nMYNN\n01:54\n\n(2:54)\nDuty: 3:14\nFlight: 2:54\nRest: 15:01\n..."}
         rows={8} style={{width:"100%",background:C.bg,border:"1.5px solid "+C.accent+"44",borderRadius:10,padding:"14px",color:C.text,fontSize:14,fontFamily:"monospace",lineHeight:1.6,resize:"vertical",outline:"none",boxSizing:"border-box",WebkitAppearance:"none"}}/>
@@ -3362,12 +3379,12 @@ function FlightDutyCalc(){
     </div>}
 
     {/* ── PASTED SCREENSHOT PREVIEW ── */}
-    {pastedImg&&!parsed&&!result&&<div style={{background:C.card,border:"1.5px solid "+C.accent+"44",borderRadius:12,padding:14,marginBottom:14}}>
+    {pastedImg&&!result&&<div style={{background:C.card,border:"1.5px solid "+C.accent+"44",borderRadius:12,padding:14,marginBottom:14}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
         <div style={{fontSize:13,fontWeight:700,color:C.text}}>📋 Screenshot Captured</div>
         <button onClick={()=>setPastedImg(null)} style={{background:"transparent",border:"none",color:C.muted,fontSize:16,cursor:"pointer",padding:"2px 6px"}}>✕</button>
       </div>
-      <img src={pastedImg} alt="Pasted screenshot" style={{width:"100%",borderRadius:8,border:"1px solid "+C.border,marginBottom:10}}/>
+      <img src={pastedImg} alt="Pasted screenshot" onClick={()=>setZoomImg(pastedImg)} style={{maxHeight:120,maxWidth:"100%",height:"auto",borderRadius:8,border:"1px solid "+C.border,marginBottom:10,cursor:"zoom-in",display:"block"}}/>
       <button onClick={handleOcrRead} disabled={ocrBusy||importing||!ocrReady}
         style={{width:"100%",padding:14,borderRadius:12,
           background:(ocrReady&&!ocrBusy)?"linear-gradient(135deg,"+C.accent+",#2a5f85)":C.panel,
@@ -3382,7 +3399,18 @@ function FlightDutyCalc(){
 
     {/* ── PARSED PREVIEW (after successful parse) ── */}
     {!result&&parsed&&<div style={{background:C.card,border:"1.5px solid "+C.green+"44",borderRadius:12,padding:16,marginBottom:14}}>
-      <div style={{fontSize:11,color:C.green,fontWeight:700,marginBottom:10}}>✓ {parsed.legs.length} leg{parsed.legs.length>1?"s":""} parsed</div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+        <div style={{fontSize:11,color:C.green,fontWeight:700}}>✓ {parsed.legs.length} leg{parsed.legs.length>1?"s":""} parsed{thumbs.length>1?` · ${thumbs.length} screenshots`:""}</div>
+        <button onClick={clearImport} style={{background:"transparent",border:"none",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer",padding:"2px 4px"}}>Clear All</button>
+      </div>
+      {/* Imported screenshot thumbnails (tap to enlarge) */}
+      {thumbs.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12,paddingBottom:10,borderBottom:"1px solid "+C.border}}>
+        {thumbs.map((t,ti)=>(
+          <div key={ti} style={{position:"relative"}}>
+            <img src={t} alt={"Screenshot "+(ti+1)} onClick={()=>setZoomImg(t)} style={{height:84,width:"auto",maxWidth:120,borderRadius:6,border:"1px solid "+C.border,cursor:"zoom-in",display:"block",objectFit:"cover"}}/>
+            <span style={{position:"absolute",top:3,left:3,background:C.accent,color:"#fff",fontSize:8,fontWeight:800,borderRadius:3,padding:"1px 5px"}}>{ti+1}</span>
+          </div>))}
+      </div>}
       {parsed.legs.map((leg,i)=>(
         <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,fontSize:12,flexWrap:"wrap"}}>
           <span style={{color:C.accent,fontWeight:700,minWidth:18}}>L{i+1}</span>
@@ -3420,8 +3448,13 @@ function FlightDutyCalc(){
 
       {parseError&&<div style={{fontSize:12,color:C.red,fontWeight:600,marginTop:8}}>{parseError}</div>}
 
-      <div style={{display:"flex",gap:10,marginTop:14}}>
-        <button onClick={()=>{setParsed(null);setNeedDate(false);setUnknownIcaos({});setCrewOverrides({});}} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.border,color:C.muted,fontSize:14,fontWeight:700,cursor:"pointer"}}>Re-paste</button>
+      {/* Add another single-column screenshot — its legs append to the list above */}
+      {!addingMore&&dutyInputMode==="import"&&<button onClick={addAnotherScreenshot} style={{width:"100%",marginTop:14,padding:13,borderRadius:12,background:C.accent+"12",border:"1.5px dashed "+C.accent+"66",color:C.accent,fontSize:14,fontWeight:800,cursor:"pointer"}}>
+        ➕ Add Another Screenshot
+      </button>}
+
+      <div style={{display:"flex",gap:10,marginTop:10}}>
+        <button onClick={clearImport} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.border,color:C.muted,fontSize:14,fontWeight:700,cursor:"pointer"}}>Re-paste</button>
         <button onClick={editLegs} style={{flex:1,padding:14,borderRadius:12,background:C.card,border:"1.5px solid "+C.accent+"44",color:C.accent,fontSize:14,fontWeight:700,cursor:"pointer"}}>✏️ Edit</button>
         <button onClick={runCalc} style={{flex:2,padding:14,borderRadius:12,background:"linear-gradient(135deg,"+C.accent+",#2a5f85)",border:"none",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",letterSpacing:.3}}>Calculate →</button>
       </div>
