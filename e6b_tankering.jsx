@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.49";
+const APP_VERSION="1.50";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2579,23 +2579,50 @@ function parseCrewScheduleOcr(text){
   const ocrJsDate=jsDateFromLegDate(curDate);
   function knownOffset(icao){const v=getIcaoOffset(icao,ocrJsDate);return v===null?undefined:Number(v);}
 
-  const legs=[];
+  // Robust time extraction from a line: returns every valid {h,m,min} it can read,
+  // accepting HH:MM or bare HHMM (3–4 digits), tolerating an "L" suffix and ANY junk
+  // between the two times — including OCR-mangled status circles (Ⓕ/Ⓡ → "F"/"R"/"©"/
+  // "(R)"/etc.). Two readable times = a leg's dep/arr line.
+  function timesInLine(line){
+    const out=[];
+    const re=/(\d{1,2}):(\d{2})|(\d{3,4})/g;
+    let m;
+    while((m=re.exec(line))){
+      let h,mm;
+      if(m[1]!==undefined){h=Number(m[1]);mm=Number(m[2]);}
+      else{const s=m[3].length===3?"0"+m[3]:m[3];h=Number(s.slice(0,2));mm=Number(s.slice(2,4));}
+      if(Number.isFinite(h)&&Number.isFinite(mm)&&h<=23&&mm<=59)out.push({h,m:mm,min:h*60+mm});
+    }
+    return out;
+  }
+
+  // Pass 1: locate every route line and every CREW SWAP line, in document order.
+  const routeAt=[],swapAt=[];
   for(let i=0;i<lines.length;i++){
-    // CREW SWAP closes the preceding leg's duty period (rest boundary).
-    if(swapRe.test(lines[i])){if(legs.length)legs[legs.length-1].hasRest=true;continue;}
+    if(swapRe.test(lines[i])){swapAt.push(i);continue;}
+    if(routeRe.test(lines[i]))routeAt.push(i);
+  }
+  if(routeAt.length===0)return null;
+
+  // Pass 2: every route claims its OWN time line. For each route, scan forward up to
+  // 3 lines (but never past the next route line) for the FIRST line that carries two
+  // valid times and has not already been consumed by an earlier route. Intervening
+  // header/customer/TRIP#/CREW SWAP/crew-initial lines are skipped. A route with no
+  // time line in range is kept as needsTimes — never dropped, and it never steals a
+  // later leg's times. Result: exactly one leg per route line.
+  const consumed=new Set();
+  const legs=[];
+  for(let r=0;r<routeAt.length;r++){
+    const i=routeAt[r];
     const rm=lines[i].match(routeRe);
-    if(!rm)continue;
     const origin=rm[1].toUpperCase(),dest=rm[2].toUpperCase();
-    // The two times sit on a following line — look ahead a few lines until the
-    // next route/swap, picking the first line carrying two digit groups.
+    const nextRoute=r+1<routeAt.length?routeAt[r+1]:lines.length;
+    const limit=Math.min(i+3,nextRoute-1,lines.length-1);
     let dep=null,arr=null;
-    for(let j=i+1;j<=Math.min(i+3,lines.length-1);j++){
-      if(routeRe.test(lines[j])||swapRe.test(lines[j]))break;
-      const toks=lines[j].match(/\d{3,6}/g);
-      if(toks&&toks.length>=2){
-        const t1=toTime(toks[0]),t2=toTime(toks[1]);
-        if(t1&&t2){dep=t1;arr=t2;break;}
-      }
+    for(let j=i+1;j<=limit;j++){
+      if(consumed.has(j))continue;
+      const ts=timesInLine(lines[j]);
+      if(ts.length>=2){dep=ts[0];arr=ts[1];consumed.add(j);break;}
     }
     if(!dep||!arr){
       // Route with no times line (e.g. "MTPP =» KMIA" followed directly by crew
@@ -2622,6 +2649,13 @@ function parseCrewScheduleOcr(text){
       isLocal:true,
       origLocalDep:String(dep.h).padStart(2,"0")+":"+String(dep.m).padStart(2,"0"),
       origLocalArr:String(arr.h).padStart(2,"0")+":"+String(arr.m).padStart(2,"0")});
+  }
+  // CREW SWAP closes the preceding leg's duty period (rest boundary): flag the last
+  // leg whose route appeared before the swap line.
+  for(const sIdx of swapAt){
+    let k=-1;
+    for(let r=0;r<routeAt.length;r++){if(routeAt[r]<sIdx)k=r;else break;}
+    if(k>=0&&legs[k])legs[k].hasRest=true;
   }
   if(legs.length===0)return null;
   // No date header found anywhere → prompt the user for the start date.
@@ -2912,7 +2946,7 @@ function FlightDutyCalc(){
       const p=parseDutyTrip(text);
       if(p&&p.legs&&p.legs.length>0){
         const thumb=pastedImg;
-        ingestParsed(p,thumb);
+        ingestParsed(p,thumb,text);
         setPastedImg(null);
         setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
         setTimeout(()=>setImportMsg(""),4000);
@@ -3003,7 +3037,7 @@ function FlightDutyCalc(){
       setImportMsg("Parsing trip data...");
       const p=parseDutyTrip(text);
       if(p&&p.legs&&p.legs.length>0){
-        ingestParsed(p,dataUrl);
+        ingestParsed(p,dataUrl,text);
         setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
         setTimeout(()=>setImportMsg(""),4000);
       }else{
@@ -3029,6 +3063,8 @@ function FlightDutyCalc(){
   // small preview per imported screenshot; addingMore re-opens the import card while
   // keeping the accumulated legs; zoomImg shows a tapped thumbnail full-screen.
   const[thumbs,setThumbs]=useState([]);
+  const[ocrTexts,setOcrTexts]=useState([]); // raw Tesseract text per screenshot (parallel to thumbs) — debug view
+  const[openOcr,setOpenOcr]=useState(null); // index of the thumbnail whose OCR text is expanded
   const[addingMore,setAddingMore]=useState(false);
   const[zoomImg,setZoomImg]=useState(null);
   // Ref mirror of `parsed` so back-to-back ingests read the freshest leg list.
@@ -3038,7 +3074,7 @@ function FlightDutyCalc(){
   // Append a freshly-parsed result's legs to the accumulated list (instead of
   // replacing). Recomputes needDate/unknown ICAOs over the COMBINED list. `thumb`
   // (a screenshot data URL) is recorded for the thumbnail row when present.
-  function ingestParsed(p,thumb){
+  function ingestParsed(p,thumb,ocrText){
     if(!p||!p.legs||!p.legs.length)return false;
     const base=(parsedRef.current&&parsedRef.current.legs)?parsedRef.current.legs:[];
     const legs=[...base,...p.legs];
@@ -3052,11 +3088,13 @@ function FlightDutyCalc(){
       if(l.dest&&tzOffsetFor(l.dest,l.date)===null)unknown[l.dest]=0;
     });
     setUnknownIcaos(Object.keys(unknown).length>0?unknown:{});
-    if(thumb)setThumbs(t=>[...t,thumb]);
+    // Keep thumbs and ocrTexts index-aligned so the debug view maps each screenshot
+    // to the raw text Tesseract read from it.
+    if(thumb){setThumbs(t=>[...t,thumb]);setOcrTexts(t=>[...t,ocrText||""]);}
     setAddingMore(false);setPasteText("");
     return true;
   }
-  function clearImport(){setParsed(null);parsedRef.current=null;setNeedDate(false);setUnknownIcaos({});setCrewOverrides({});setThumbs([]);setPastedImg(null);setPasteText("");setAddingMore(false);setParseError("");setResult(null);}
+  function clearImport(){setParsed(null);parsedRef.current=null;setNeedDate(false);setUnknownIcaos({});setCrewOverrides({});setThumbs([]);setOcrTexts([]);setOpenOcr(null);setPastedImg(null);setPasteText("");setAddingMore(false);setParseError("");setResult(null);}
   function addAnotherScreenshot(){setAddingMore(true);setPasteText("");setParseError("");setPastedImg(null);}
 
   // Handle paste into the contentEditable paste box
@@ -3275,7 +3313,7 @@ function FlightDutyCalc(){
   function handleOffsetChange(pi,field,val){setCustomOffsets(prev=>({...prev,[pi]:{...(prev[pi]||{on:Number(dutyOnDef)||0,off:Number(dutyOffDef)||0}),[field]:Number(val)}}));}
   function statusColor(s){return s==="red"?C.red:s==="amber"?C.gold:C.green;}
   function statusLabel(s){return s==="red"?"EXCEEDED":s==="amber"?"CAUTION":"OK";}
-  function resetAll(){setParsed(null);parsedRef.current=null;setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);setThumbs([]);setAddingMore(false);}
+  function resetAll(){setParsed(null);parsedRef.current=null;setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);setThumbs([]);setOcrTexts([]);setOpenOcr(null);setAddingMore(false);}
 
   function editLegs(){
     if(!parsed)return;
@@ -3302,7 +3340,7 @@ function FlightDutyCalc(){
     setManualLegs(mLegs);
     setDutyInputMode("manual");
     setParsed(null);parsedRef.current=null;
-    setThumbs([]);setAddingMore(false);
+    setThumbs([]);setOcrTexts([]);setOpenOcr(null);setAddingMore(false);
     setResult(null);
     setParseError("");
     setShowExplain(false);
@@ -3461,13 +3499,23 @@ function FlightDutyCalc(){
         <div style={{fontSize:11,color:C.green,fontWeight:700}}>✓ {parsed.legs.length} leg{parsed.legs.length>1?"s":""} parsed{thumbs.length>1?` · ${thumbs.length} screenshots`:""}</div>
         <button onClick={clearImport} style={{background:"transparent",border:"none",color:C.red,fontSize:11,fontWeight:700,cursor:"pointer",padding:"2px 4px"}}>Clear All</button>
       </div>
-      {/* Imported screenshot thumbnails (tap to enlarge) */}
-      {thumbs.length>0&&<div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12,paddingBottom:10,borderBottom:"1px solid "+C.border}}>
-        {thumbs.map((t,ti)=>(
-          <div key={ti} style={{position:"relative"}}>
-            <img src={t} alt={"Screenshot "+(ti+1)} onClick={()=>setZoomImg(t)} style={{height:190,width:"auto",maxWidth:"100%",borderRadius:8,border:"1px solid "+C.border,cursor:"zoom-in",display:"block"}}/>
-            <span style={{position:"absolute",top:4,left:4,background:C.accent,color:"#fff",fontSize:10,fontWeight:800,borderRadius:4,padding:"2px 7px"}}>{ti+1}</span>
-          </div>))}
+      {/* Imported screenshot thumbnails (tap to enlarge · expand raw OCR text for debugging) */}
+      {thumbs.length>0&&<div style={{marginBottom:12,paddingBottom:10,borderBottom:"1px solid "+C.border}}>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-start"}}>
+          {thumbs.map((t,ti)=>(
+            <div key={ti} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+              <div style={{position:"relative"}}>
+                <img src={t} alt={"Screenshot "+(ti+1)} onClick={()=>setZoomImg(t)} style={{height:190,width:"auto",maxWidth:"100%",borderRadius:8,border:"1px solid "+C.border,cursor:"zoom-in",display:"block"}}/>
+                <span style={{position:"absolute",top:4,left:4,background:C.accent,color:"#fff",fontSize:10,fontWeight:800,borderRadius:4,padding:"2px 7px"}}>{ti+1}</span>
+              </div>
+              {ocrTexts[ti]?<button onClick={()=>setOpenOcr(openOcr===ti?null:ti)} style={{background:"transparent",border:"none",color:C.accent,fontSize:10,fontWeight:700,cursor:"pointer",padding:"1px 4px"}}>{openOcr===ti?"Hide OCR text ▲":"Show OCR text ▼"}</button>:null}
+            </div>))}
+        </div>
+        {openOcr!=null&&ocrTexts[openOcr]&&<div style={{marginTop:8}}>
+          <div style={{fontSize:10,color:C.muted,fontWeight:700,marginBottom:4}}>Screenshot {openOcr+1} — raw OCR text (Tesseract). Tap to select &amp; copy.</div>
+          <textarea readOnly value={ocrTexts[openOcr]} rows={8} onClick={e=>e.target.select()}
+            style={{width:"100%",background:C.bg,border:"1px solid "+C.border,borderRadius:8,padding:"8px",color:C.text,fontSize:11,fontFamily:"monospace",lineHeight:1.5,resize:"vertical",outline:"none",boxSizing:"border-box",WebkitAppearance:"none"}}/>
+        </div>}
       </div>}
       {parsed.legs.map((leg,i)=>(
         <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,fontSize:12,flexWrap:"wrap"}}>
