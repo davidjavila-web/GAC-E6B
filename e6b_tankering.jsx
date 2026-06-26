@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.43";
+const APP_VERSION="1.44";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2694,8 +2694,15 @@ function resolveLegTimes(legs){
   for(let i=0;i<legs.length;i++){
     const leg=legs[i];let depEpoch;
     if(leg.date){depEpoch=dateToEpoch(leg.date,leg.depH,leg.depM);}
-    else if(prevArrEpoch){const d=new Date(prevArrEpoch);depEpoch=new Date(d.getFullYear(),d.getMonth(),d.getDate(),leg.depH,leg.depM).getTime();if(depEpoch<prevArrEpoch)depEpoch+=86400000;}
+    else if(prevArrEpoch){const d=new Date(prevArrEpoch);depEpoch=new Date(d.getFullYear(),d.getMonth(),d.getDate(),leg.depH,leg.depM).getTime();}
     else{depEpoch=dateToEpoch({day:1,month:"JAN",year2:25},leg.depH,leg.depM);}
+    // A leg can never depart before the previous leg arrived. Manual entry auto-copies
+    // the prior leg's date, so multi-leg trips often carry a stale date while an earlier
+    // leg's UTC arrival has already rolled past midnight — which would place a later leg
+    // BEFORE it and collapse a real rest gap. Roll the departure forward whole days until
+    // it is at/after the previous arrival. Correct date-driven gaps are already >=, so
+    // they're untouched.
+    if(prevArrEpoch!=null)while(depEpoch<prevArrEpoch)depEpoch+=86400000;
     const arrEpoch=depEpoch+leg.flightMins*60000;
     resolved.push({...leg,depEpoch,arrEpoch});prevArrEpoch=arrEpoch;
   }
@@ -2736,27 +2743,41 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
     dutyResults[i].restBefore=restHrs;dutyResults[i].restLimit=rLimits.rest;totalRest+=restHrs;
     if(restHrs<rLimits.rest)violations.push({period:i,type:"rest",msg:`Rest before duty period ${i+1} is ${restHrs.toFixed(1)} hrs — minimum ${rLimits.rest} hrs required for ${rLimits.label}.`});
   }
-  // Rolling 24-hour check — limit comes from the CURRENT duty period's crew config,
+  // Rolling 24-hour check — the limit comes from the CURRENT duty period's crew config,
   // but ALL flight time in the prior 24 hrs counts regardless of which crew flew it.
-  for(let li=0;li<allLegs.length;li++){
-    const leg=allLegs[li];
-    const r24Limit=limitsFor(leg.periodIdx).rolling24;
-    const checkPoints=[];
-    for(let t=leg.depEpoch;t<=leg.arrEpoch;t+=1800000)checkPoints.push(t);
-    if(!checkPoints.includes(leg.arrEpoch))checkPoints.push(leg.arrEpoch);
-    for(const t of checkPoints){
+  // Sample the rolling total continuously across the whole trip (every 30 min plus each
+  // leg's exact dep/arr boundary), then collapse a contiguous run of over-limit samples
+  // into ONE violation reported at its PEAK. The window only ends when the rolling total
+  // actually drops back under the limit — ground time between legs does NOT split it.
+  const samples=[];
+  if(allLegs.length){
+    const start=allLegs[0].depEpoch,end=allLegs[allLegs.length-1].arrEpoch;
+    const times=new Set();
+    for(let t=start;t<=end;t+=1800000)times.add(t);
+    for(const l of allLegs){times.add(l.depEpoch);times.add(l.arrEpoch);}
+    for(const t of [...times].sort((a,b)=>a-b)){
+      // "Current" period at t = the latest leg that has already departed.
+      let curIdx=0;
+      for(let k=0;k<allLegs.length;k++){if(allLegs[k].depEpoch<=t)curIdx=k;else break;}
+      const r24Limit=limitsFor(allLegs[curIdx].periodIdx).rolling24;
       const w24=t-86400000;let flt=0;const contribs=[];
       for(const ol of allLegs){
         const os=Math.max(ol.depEpoch,w24),oe=Math.min(ol.arrEpoch,t);
         if(oe>os){const hrs=(oe-os)/3600000;flt+=hrs;contribs.push({origin:ol.origin,dest:ol.dest,hrs});}
       }
-      if(flt>r24Limit){
-        const exists=violations.find(v=>v.type==="rolling24"&&v.legIdx===li&&Math.abs((v.time||0)-t)<1800000);
-        if(!exists)violations.push({period:leg.periodIdx,type:"rolling24",legIdx:li,time:t,total:flt,leg,contributors:contribs,
-          msg:`Rolling 24-hr limit exceeded at ${fmtEpochT(t)}: ${flt.toFixed(1)} hrs flight (max ${r24Limit}).`});
-      }
+      samples.push({t,flt,limit:r24Limit,periodIdx:allLegs[curIdx].periodIdx,legIdx:curIdx,contribs});
     }
   }
+  let win=null;
+  const closeWin=()=>{if(!win)return;const pk=win.peak;
+    violations.push({period:pk.periodIdx,type:"rolling24",legIdx:pk.legIdx,time:pk.t,total:pk.flt,leg:allLegs[pk.legIdx],contributors:pk.contribs,
+      msg:`Rolling 24-hr limit exceeded: peak ${pk.flt.toFixed(1)} hrs flight (max ${pk.limit}) at ${fmtEpochT(pk.t)}.`});
+    win=null;};
+  for(const s of samples){
+    if(s.flt>s.limit){if(win){win.lastT=s.t;if(s.flt>win.peak.flt)win.peak=s;}else{win={lastT:s.t,peak:s};}}
+    else{closeWin();}
+  }
+  closeWin();
   return{dutyResults,violations,totalFlight,totalDuty,totalRest,allLegs,limits};
 }
 
