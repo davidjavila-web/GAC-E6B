@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.54";
+const APP_VERSION="1.55";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -210,6 +210,17 @@ const LEG_COLORS=["#4a7fa5","#5a8f7a","#8a7a5a","#7a5a8a","#4a7a6a","#7a6a4a","#
 // Indexed by global leg position; wraps after the 6th leg.
 const DUTY_LEG_COLORS=[C.accent /* blue */,"#0891b2" /* teal */,"#d97706" /* amber */,"#7c3aed" /* purple */,"#059669" /* green */,"#dc2626" /* red */];
 const dutyLegColor=i=>DUTY_LEG_COLORS[i%DUTY_LEG_COLORS.length];
+// Light wash + matching badge per leg color (2-up tinted manual-entry grid). In dark
+// mode the wash is a low-alpha translucent tint over the dark card so text stays legible.
+const DUTY_LEG_TINTS=[
+  {bg:"#eaf0fe",badge:"#2563eb"}, // blue
+  {bg:"#e8f6f8",badge:"#3a9ca8"}, // teal
+  {bg:"#fdf2e3",badge:"#d97a18"}, // amber
+  {bg:"#f2ecfd",badge:"#7c3aed"}, // purple
+  {bg:"#e8f7ee",badge:"#2f9e54"}, // green
+  {bg:"#fdeceb",badge:"#e0493b"}, // red
+];
+const legTint=i=>{const t=DUTY_LEG_TINTS[i%DUTY_LEG_TINTS.length];return{bg:themeIsDark()?t.badge+"24":t.bg,badge:t.badge};};
 
 const fL=n=>Number(n||0).toLocaleString(undefined,{maximumFractionDigits:0})+" lbs";
 const fG=n=>(Number(n||0)/LBS_PER_GAL).toLocaleString(undefined,{maximumFractionDigits:0})+" gal";
@@ -2860,13 +2871,17 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
     const mixed=!forced&&new Set(legCrews).size>1;
     const firstDep=pLegs[0].depEpoch,lastArr=pLegs[pLegs.length-1].arrEpoch;
     const dutyStart=firstDep-onOff.on*60000,dutyEnd=lastArr+onOff.off*60000;
-    const dutyHrs=(dutyEnd-dutyStart)/3600000;
-    const flightHrs=pLegs.reduce((s,l)=>s+l.flightMins/60,0);
+    const dutyMin=Math.round((dutyEnd-dutyStart)/60000);
+    const dutyHrs=dutyMin/60;
+    const flightMin=pLegs.reduce((s,l)=>s+l.flightMins,0); // exact integer minutes
+    const flightHrs=flightMin/60;
     const dutyPct=dutyHrs/govLimits.duty,flightPct=flightHrs/govLimits.flight;
     const dutyStatus=dutyPct>1?"red":dutyPct>=0.8?"amber":"green";
     const flightStatus=flightPct>1?"red":flightPct>=0.8?"amber":"green";
-    if(dutyHrs>govLimits.duty)violations.push({period:pi,type:"duty",msg:`Duty period ${pi+1} is ${dutyHrs.toFixed(1)} hrs — exceeds ${govLimits.duty} hr max for ${govLimits.label}.`});
-    if(flightHrs>govLimits.flight)violations.push({period:pi,type:"flight",msg:`Flight time in duty period ${pi+1} is ${flightHrs.toFixed(1)} hrs — exceeds ${govLimits.flight} hr max for ${govLimits.label}.`});
+    if(dutyMin>govLimits.duty*60)violations.push({period:pi,type:"duty",actualMin:dutyMin,limitMin:govLimits.duty*60,label:govLimits.label,reg:govLimits.reg,
+      msg:`Duty period ${pi+1} is ${fmtHM(dutyMin)} — exceeds ${fmtHM(govLimits.duty*60)} max for ${govLimits.label}.`});
+    if(flightMin>govLimits.flight*60)violations.push({period:pi,type:"flight",actualMin:flightMin,limitMin:govLimits.flight*60,label:govLimits.label,reg:govLimits.reg,
+      msg:`Flight time in duty period ${pi+1} is ${fmtHM(flightMin)} — exceeds ${fmtHM(govLimits.flight*60)} max for ${govLimits.label}.`});
     totalFlight+=flightHrs;totalDuty+=dutyHrs;
     pLegs.forEach(l=>allLegs.push({...l,periodIdx:pi}));
     dutyResults.push({periodIdx:pi,legs:pLegs,dutyStart,dutyEnd,dutyHrs,flightHrs,dutyStatus,flightStatus,onMin:onOff.on,offMin:onOff.off,
@@ -2876,50 +2891,56 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
   // restBefore (its FIRST-leg config).
   for(let i=1;i<dutyResults.length;i++){
     const prev=dutyResults[i-1],cur=dutyResults[i];
-    const restHrs=(cur.dutyStart-prev.dutyEnd)/3600000;
+    const restMinExact=(cur.dutyStart-prev.dutyEnd)/60000;
+    const restHrs=restMinExact/60;
     const afterHrs=prev.restAfter,beforeHrs=cur.firstLimits.restBefore;
-    const req=Math.max(afterHrs,beforeHrs);
+    const req=Math.max(afterHrs,beforeHrs),reqMin=req*60;
     cur.restBefore=restHrs;cur.restReq=req;
     cur.restAfterPrevHrs=afterHrs;cur.restAfterPrevLabel=prev.limits.label;
     cur.restBeforeHrs=beforeHrs;cur.restBeforeLabel=cur.firstLimits.label;
     totalRest+=restHrs;
-    if(restHrs<req)violations.push({period:i,type:"rest",msg:`Rest before duty period ${i+1} is ${restHrs.toFixed(1)} hrs — minimum ${req} hrs required (${afterHrs}h after ${prev.limits.label} duty / ${beforeHrs}h before ${cur.firstLimits.label} start).`});
+    if(restMinExact<reqMin){const restMin=Math.round(restMinExact);
+      const govLabel=afterHrs>=beforeHrs?prev.limits.label:cur.firstLimits.label;
+      const govReg=afterHrs>=beforeHrs?prev.limits.reg:cur.firstLimits.reg;
+      violations.push({period:i,type:"rest",actualMin:restMin,reqMin,shortMin:reqMin-restMin,
+        afterHrs,beforeHrs,prevLabel:prev.limits.label,thisLabel:cur.firstLimits.label,govLabel,reg:govReg,dateMs:cur.dutyStart,
+        msg:`Rest before duty period ${i+1} is ${fmtHM(restMin)} — minimum ${fmtHM(reqMin)} required (${afterHrs}h after ${prev.limits.label} duty / ${beforeHrs}h before ${cur.firstLimits.label} start).`});}
   }
-  // Rolling 24-hour check — the limit comes from the CURRENT duty period's crew config,
-  // but ALL flight time in the prior 24 hrs counts regardless of which crew flew it.
-  // Sample the rolling total continuously across the whole trip (every 30 min plus each
-  // leg's exact dep/arr boundary), then collapse a contiguous run of over-limit samples
-  // into ONE violation reported at its PEAK. The window only ends when the rolling total
-  // actually drops back under the limit — ground time between legs does NOT split it.
-  const samples=[];
+  // Rolling 24-hour check — EXACT integer minutes. The flight-time limit (10/12/16h →
+  // 600/720/960 min) applies to any 24-consecutive-hour window. The maximum-coverage
+  // window can always be left-aligned to a leg's wheels-up, so we test exactly one window
+  // per leg: [up_i, up_i+24h). For each, sum the OVERLAP (clipped at the far edge) of
+  // every leg's wheels-up→wheels-down flight in whole minutes. The governing limit is the
+  // anchor leg's crew rolling24. Flag ONLY when the total is STRICTLY GREATER THAN the
+  // limit — exactly the limit (e.g. 12:00) is COMPLIANT. Report the single worst window.
   if(allLegs.length){
-    const start=allLegs[0].depEpoch,end=allLegs[allLegs.length-1].arrEpoch;
-    const times=new Set();
-    for(let t=start;t<=end;t+=1800000)times.add(t);
-    for(const l of allLegs){times.add(l.depEpoch);times.add(l.arrEpoch);}
-    for(const t of [...times].sort((a,b)=>a-b)){
-      // "Current" period at t = the latest leg that has already departed.
-      let curIdx=0;
-      for(let k=0;k<allLegs.length;k++){if(allLegs[k].depEpoch<=t)curIdx=k;else break;}
-      const r24Limit=dutyResults[allLegs[curIdx].periodIdx].limits.rolling24;
-      const w24=t-86400000;let flt=0;const contribs=[];
-      for(const ol of allLegs){
-        const os=Math.max(ol.depEpoch,w24),oe=Math.min(ol.arrEpoch,t);
-        if(oe>os){const hrs=(oe-os)/3600000;flt+=hrs;contribs.push({origin:ol.origin,dest:ol.dest,hrs});}
+    const WIN=86400000;
+    let worst=null;
+    for(let a=0;a<allLegs.length;a++){
+      const up=allLegs[a].depEpoch,winEnd=up+WIN;
+      let totalMin=0;const parts=[];let lastInWin=a; // latest flight STARTING in this window = "current" crew
+      for(let j=0;j<allLegs.length;j++){
+        const lg=allLegs[j];
+        const os=Math.max(lg.depEpoch,up),oe=Math.min(lg.arrEpoch,winEnd);
+        if(oe>os){const mins=Math.round((oe-os)/60000);totalMin+=mins;parts.push({legIdx:j,origin:lg.origin,dest:lg.dest,mins});}
+        if(lg.depEpoch>=up&&lg.depEpoch<winEnd)lastInWin=j;
       }
-      samples.push({t,flt,limit:r24Limit,periodIdx:allLegs[curIdx].periodIdx,legIdx:curIdx,contribs});
+      // The governing rolling-24 limit is the CURRENT duty period's crew config — i.e.
+      // the most recent flight in the window — even though all flight in the window counts.
+      const dl=dutyResults[allLegs[lastInWin].periodIdx].limits;
+      const limitMin=dl.rolling24*60;
+      const excess=totalMin-limitMin;
+      if(!worst||excess>worst.excess)worst={anchorIdx:a,up,totalMin,limitMin,parts,excess,periodIdx:allLegs[lastInWin].periodIdx,label:dl.label,reg:dl.reg};
+    }
+    if(worst&&worst.excess>0){
+      const contribStr=worst.parts.map(p=>`Leg ${p.legIdx+1} ${fmtHM(p.mins)}`).join(" + ");
+      const zd=new Date(worst.up),zMon=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][zd.getMonth()];
+      const zwin=`${String(zd.getHours()).padStart(2,"0")}:${String(zd.getMinutes()).padStart(2,"0")}z ${zd.getDate()} ${zMon}`;
+      violations.push({period:worst.periodIdx,type:"rolling24",anchorIdx:worst.anchorIdx,anchorUp:worst.up,window:zwin,
+        totalMin:worst.totalMin,limitMin:worst.limitMin,excessMin:worst.excess,parts:worst.parts,label:worst.label,reg:worst.reg,
+        msg:`window from Leg ${worst.anchorIdx+1} wheels-up (${zwin}): ${contribStr} = ${fmtHM(worst.totalMin)}, exceeds ${fmtHM(worst.limitMin)} by ${fmtHM(worst.excess)}.`});
     }
   }
-  let win=null;
-  const closeWin=()=>{if(!win)return;const pk=win.peak;
-    violations.push({period:pk.periodIdx,type:"rolling24",legIdx:pk.legIdx,time:pk.t,total:pk.flt,leg:allLegs[pk.legIdx],contributors:pk.contribs,
-      msg:`Rolling 24-hr limit exceeded: peak ${pk.flt.toFixed(1)} hrs flight (max ${pk.limit}) at ${fmtEpochT(pk.t)}.`});
-    win=null;};
-  for(const s of samples){
-    if(s.flt>s.limit){if(win){win.lastT=s.t;if(s.flt>win.peak.flt)win.peak=s;}else{win={lastT:s.t,peak:s};}}
-    else{closeWin();}
-  }
-  closeWin();
   return{dutyResults,violations,totalFlight,totalDuty,totalRest,allLegs,limits};
 }
 
@@ -3450,65 +3471,61 @@ function FlightDutyCalc(){
     {/* ── MANUAL ENTRY ── */}
     {!result&&!parsed&&dutyInputMode==="manual"&&<div style={{background:C.card,border:"1.5px solid "+C.accent+"55",borderRadius:12,padding:16,marginBottom:14}}>
       <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:12}}>✏️ Enter Legs</div>
+      {/* Responsive 2-up tinted grid: 2 cards/row when wide enough, 1 when narrow */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(300px, 1fr))",gap:12,marginBottom:12}}>
       {manualLegs.map((ml,i)=>{
-        const lc=dutyLegColor(i);
+        const tint=legTint(i);
         const mode=ml.mode||"Z",isL=mode==="L";
         const legCrew=ml.crewMode||crewMode;
         // Live flight time from canonical UTC buffers (kept current as the user types).
         const depMin=hhmmToMin(ml.depTime||""),arrMin=hhmmToMin(ml.arrTime||"");
         let ftMin=null;
         if(depMin!==null&&arrMin!==null){ftMin=arrMin-depMin;if(ftMin<0)ftMin+=1440;}
-        const modeColor=isL?C.amber:C.accent;
         const depUnknown=isL&&ml.origin&&tzOffsetFor(ml.origin,ml.date)===null;
         const arrUnknown=isL&&ml.dest&&tzOffsetFor(ml.dest,ml.date)===null;
-        const timeBorderColor=isL?C.amber:C.border;
-        const timeInputStyle={width:"100%",background:C.card,border:"1.5px solid "+timeBorderColor,borderRadius:8,padding:"9px 8px",color:C.text,fontSize:16,fontWeight:700,textAlign:"center",letterSpacing:1,boxSizing:"border-box"};
-        const icaoInputStyle={width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"9px 6px",color:C.text,fontSize:14,fontWeight:700,textAlign:"center",textTransform:"uppercase",letterSpacing:1,boxSizing:"border-box"};
-        return(<div key={i} style={{background:C.bg,borderRadius:10,padding:12,marginBottom:10,border:"1px solid "+C.border,borderLeft:"3px solid "+lc}}>
-          {/* Row 1: badge · date · origin → dest · Z|L toggle · X */}
-          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8,flexWrap:"wrap"}}>
-            <span style={{background:lc,color:"#fff",borderRadius:6,padding:"3px 8px",fontSize:11,fontWeight:800,letterSpacing:.4,flexShrink:0}}>LEG {i+1}</span>
+        const timeBorder=isL?C.amber:C.border;
+        // Inner fields stay on the (white in light / dark in dark) card surface for legibility.
+        const icaoSt={width:"100%",maxWidth:80,margin:"0 auto",display:"block",background:C.card,borderRadius:8,padding:"8px 4px",color:C.text,fontSize:14,fontWeight:700,textAlign:"center",textTransform:"uppercase",letterSpacing:1,boxSizing:"border-box",outline:"none",border:"1.5px solid "+C.border};
+        const timeSt={width:"100%",marginTop:6,background:C.card,borderRadius:8,padding:"8px 6px",color:C.text,fontSize:16,fontWeight:700,textAlign:"center",letterSpacing:1,boxSizing:"border-box",outline:"none",border:"1.5px solid "+timeBorder};
+        const cap={fontSize:9,fontWeight:800,letterSpacing:.6,color:C.muted,textTransform:"uppercase",marginBottom:4};
+        const subLbl={fontSize:9,color:C.muted,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"};
+        return(<div key={i} style={{background:tint.bg,border:"1px solid "+tint.badge+"44",borderRadius:12,padding:12}}>
+          {/* Header: LEG badge · date · Z|L (right) · remove */}
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}>
+            <span style={{background:tint.badge,color:"#fff",borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800,letterSpacing:.4,flexShrink:0}}>LEG {i+1}</span>
             <input type="date" value={ml.date} onChange={e=>updateManualLeg(i,"date",e.target.value)}
-              style={{flex:"1 1 130px",minWidth:120,background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"7px 8px",color:C.text,fontSize:12,fontWeight:700,boxSizing:"border-box"}}/>
-            <input value={ml.origin} onChange={e=>updateManualLeg(i,"origin",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoInputStyle,flex:"1 1 56px",minWidth:56,borderColor:ml.origin&&ml.origin.length<4?C.red:C.border}}/>
-            <span style={{color:C.muted,fontSize:13,fontWeight:700,flexShrink:0}}>→</span>
-            <input value={ml.dest} onChange={e=>updateManualLeg(i,"dest",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoInputStyle,flex:"1 1 56px",minWidth:56,borderColor:ml.dest&&ml.dest.length<4?C.red:C.border}}/>
+              style={{flex:"1 1 auto",minWidth:0,background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"6px 6px",color:C.text,fontSize:11,fontWeight:700,boxSizing:"border-box"}}/>
             <div style={{display:"flex",background:C.card,border:"1px solid "+C.border,borderRadius:6,padding:2,flexShrink:0}}>
               {["Z","L"].map(m=>(<button key={m} onClick={()=>setManualLegMode(i,m)} style={{padding:"4px 9px",borderRadius:4,border:"none",background:mode===m?(m==="L"?C.amber:C.accent):"transparent",color:mode===m?"#fff":C.muted,fontSize:11,fontWeight:800,cursor:"pointer",letterSpacing:.5}}>{m}</button>))}
             </div>
-            {manualLegs.length>1&&<button onClick={()=>removeManualLeg(i)} style={{background:"transparent",border:"none",color:C.red,fontSize:16,cursor:"pointer",padding:"2px 6px",flexShrink:0}}>✕</button>}
+            {manualLegs.length>1&&<button onClick={()=>removeManualLeg(i)} style={{background:"transparent",border:"none",color:C.red,fontSize:16,cursor:"pointer",padding:"2px 4px",flexShrink:0}}>✕</button>}
           </div>
-          {/* Row 2: dep — arr */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,alignItems:"end"}}>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:4}}>
-                <span>Dep · {mode==="Z"?"Zulu":"Local"+(ml.origin?" ("+ml.origin+")":"")}</span>
-                {depUnknown&&<span title="Unknown ICAO — treated as UTC+0" style={{color:C.amber,fontWeight:800}}>?</span>}
-              </div>
-              <input value={ml.depInput||""} onChange={e=>setManualLegTime(i,"dep",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputStyle}/>
+          {/* Body: two stop cards — DEPART → ARRIVE */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,alignItems:"start"}}>
+            <div style={{textAlign:"center"}}>
+              <div style={cap}>Depart</div>
+              <input value={ml.origin} onChange={e=>updateManualLeg(i,"origin",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoSt,borderColor:ml.origin&&ml.origin.length<4?C.red:C.border}}/>
+              <input value={ml.depInput||""} onChange={e=>setManualLegTime(i,"dep",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeSt}/>
+              <div style={subLbl}>{mode==="Z"?"Zulu":"Local"+(ml.origin?" "+ml.origin:"")}{depUnknown?" ?":""}</div>
             </div>
-            <span style={{color:C.muted,fontSize:14,fontWeight:700,paddingBottom:11}}>—</span>
-            <div>
-              <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4,display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end"}}>
-                <span>Arr · {mode==="Z"?"Zulu":"Local"+(ml.dest?" ("+ml.dest+")":"")}</span>
-                {arrUnknown&&<span title="Unknown ICAO — treated as UTC+0" style={{color:C.amber,fontWeight:800}}>?</span>}
-              </div>
-              <input value={ml.arrInput||""} onChange={e=>setManualLegTime(i,"arr",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeInputStyle}/>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:4,paddingTop:22}}>
+              <span style={{color:tint.badge,fontSize:18,fontWeight:800}}>→</span>
+              {ftMin!==null&&<span style={{background:C.gold+"1f",color:C.gold,borderRadius:6,padding:"2px 6px",fontSize:10,fontWeight:800,whiteSpace:"nowrap"}}>{fmtHM(ftMin)}</span>}
+            </div>
+            <div style={{textAlign:"center"}}>
+              <div style={cap}>Arrive</div>
+              <input value={ml.dest} onChange={e=>updateManualLeg(i,"dest",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoSt,borderColor:ml.dest&&ml.dest.length<4?C.red:C.border}}/>
+              <input value={ml.arrInput||""} onChange={e=>setManualLegTime(i,"arr",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeSt}/>
+              <div style={subLbl}>{mode==="Z"?"Zulu":"Local"+(ml.dest?" "+ml.dest:"")}{arrUnknown?" ?":""}</div>
             </div>
           </div>
-          {/* Live flight time — appears once both times are valid */}
-          {ftMin!==null&&<div style={{display:"flex",justifyContent:"flex-end",marginTop:6}}>
-            <span style={{background:C.gold+"1f",color:C.gold,borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800,letterSpacing:.3}}>✈ {fmtHM(ftMin)}</span>
-          </div>}
-          {/* Row 3: per-leg crew config */}
-          <div style={{marginTop:8}}>
-            <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>Crew</div>
-            <div style={{display:"flex",gap:0,background:C.card,borderRadius:7,padding:2,border:"1px solid "+C.border}}>
-              {[2,3,4].map(n=>(<button key={n} onClick={()=>updateManualLeg(i,"crewMode",n)} style={{flex:1,padding:"5px 4px",borderRadius:5,border:"none",background:legCrew===n?C.accent+"22":"transparent",color:legCrew===n?C.accent:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
-            </div>
+          {/* Crew selector — full width */}
+          <div style={{display:"flex",gap:0,background:C.card,borderRadius:7,padding:2,border:"1px solid "+C.border,marginTop:10}}>
+            {[2,3,4].map(n=>(<button key={n} onClick={()=>updateManualLeg(i,"crewMode",n)} style={{flex:1,padding:"5px 4px",borderRadius:5,border:"none",background:legCrew===n?tint.badge+"22":"transparent",color:legCrew===n?tint.badge:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
           </div>
         </div>);
       })}
+      </div>
       <div style={{display:"flex",gap:8}}>
         <button onClick={addManualLeg}
           style={{flex:1,padding:10,borderRadius:8,border:"1.5px dashed "+C.accent+"66",background:"transparent",color:C.accent,fontSize:13,fontWeight:700,cursor:"pointer"}}>
@@ -3728,13 +3745,49 @@ function FlightDutyCalc(){
         <span style={{fontSize:10,color:C.muted}}>local (zuluz)</span>
       </div>
 
-      {result.violations.length>0&&<div style={{background:C.red+"12",border:"2px solid "+C.red+"44",borderRadius:14,padding:16,marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><span style={{fontSize:20}}>🚨</span><div style={{fontSize:14,fontWeight:800,color:C.red}}>{result.violations.length} Violation{result.violations.length>1?"s":""}</div></div>
-        {result.violations.map((v,i)=>(
-          <div key={i} style={{fontSize:12,color:C.text,lineHeight:1.7,paddingBottom:i<result.violations.length-1?8:0,borderBottom:i<result.violations.length-1?"1px solid "+C.red+"22":"none",marginBottom:i<result.violations.length-1?8:0}}>
-            <span style={{fontWeight:700,color:C.red}}>{v.type==="duty"?"DUTY":v.type==="flight"?"FLIGHT":v.type==="rest"?"REST":"24HR"}</span>{" "}{v.msg}
-          </div>))}
-      </div>}
+      {/* ── VIOLATION SUMMARY (top of results) ── */}
+      {(()=>{
+        const vs=result.violations;
+        if(vs.length===0)return(<div style={{background:C.green+"14",border:"2px solid "+C.green+"55",borderRadius:14,padding:16,marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:22}}>✅</span>
+          <div><div style={{fontSize:14,fontWeight:800,color:C.green}}>All clear — compliant with FAR 135.267/.269</div>
+            <div style={{fontSize:12,color:C.sub,marginTop:2}}>No duty, flight, rest, or rolling-24 violations across {result.dutyResults.length} duty period{result.dutyResults.length>1?"s":""}.</div></div>
+        </div>);
+        const catName={rest:"REST",flight:"FLIGHT",duty:"DUTY",rolling24:"ROLLING-24"};
+        const regShort=s=>String(s||"").replace("FAR ","");
+        const dlab=ms=>{const d=new Date(ms);return d.getDate()+" "+_MON[d.getMonth()];};
+        return(<div style={{background:C.red+"12",border:"2px solid "+C.red+"44",borderRadius:14,padding:16,marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}><span style={{fontSize:20}}>🚨</span><div style={{fontSize:14,fontWeight:800,color:C.red}}>{vs.length} Violation{vs.length>1?"s":""} — not compliant with FAR 135.267/.269</div></div>
+          {vs.map((v,i)=>{
+            let head="",why="",tail="";
+            if(v.type==="rest"){
+              head=`Before Duty Period ${v.period+1} (${dlab(v.dateMs)}): ${fmtHM(v.actualMin)} actual, ${fmtHM(v.reqMin)} required.`;
+              why=`DP${v.period} (${v.prevLabel}) owes ${v.afterHrs}h after; DP${v.period+1} (${v.thisLabel}) needs ${v.beforeHrs}h before — the larger ${fmtHM(v.reqMin)} is owed per ${regShort(v.reg)}.`;
+              tail=`SHORT BY ${fmtHM(v.shortMin)}`;
+            }else if(v.type==="flight"){
+              head=`Duty Period ${v.period+1}: ${fmtHM(v.actualMin)} flight time, ${fmtHM(v.limitMin)} limit.`;
+              why=`Flight-time cap for ${v.label} operations (${regShort(v.reg)}).`;
+              tail=`OVER BY ${fmtHM(v.actualMin-v.limitMin)}`;
+            }else if(v.type==="duty"){
+              head=`Duty Period ${v.period+1}: ${fmtHM(v.actualMin)} duty time, ${fmtHM(v.limitMin)} limit.`;
+              why=`Duty-period cap for ${v.label} operations (${regShort(v.reg)}).`;
+              tail=`OVER BY ${fmtHM(v.actualMin-v.limitMin)}`;
+            }else if(v.type==="rolling24"){
+              head=`24h window from Leg ${v.anchorIdx+1} wheels-up (${v.window}): ${v.parts.map(p=>"Leg "+(p.legIdx+1)+" "+fmtHM(p.mins)).join(" + ")} = ${fmtHM(v.totalMin)}, limit ${fmtHM(v.limitMin)}.`;
+              why=`No 24 consecutive hours may exceed ${fmtHM(v.limitMin)} flight time for ${v.label} (${regShort(v.reg)}).`;
+              tail=`OVER BY ${fmtHM(v.excessMin)}`;
+            }
+            return(<div key={i} style={{paddingBottom:i<vs.length-1?10:0,borderBottom:i<vs.length-1?"1px solid "+C.red+"22":"none",marginBottom:i<vs.length-1?10:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3,flexWrap:"wrap"}}>
+                <span style={{background:C.red,color:"#fff",borderRadius:5,padding:"2px 8px",fontSize:10,fontWeight:800,letterSpacing:.5}}>{catName[v.type]}</span>
+                <span style={{fontSize:11,fontWeight:800,color:C.red}}>{tail}</span>
+              </div>
+              <div style={{fontSize:12,color:C.text,lineHeight:1.5,fontWeight:600}}>{head}</div>
+              <div style={{fontSize:11,color:C.sub,lineHeight:1.5,marginTop:2}}>{why}</div>
+            </div>);
+          })}
+        </div>);
+      })()}
 
       {result.dutyResults.map((dp,i)=>{
         const worst=dp.dutyStatus==="red"||dp.flightStatus==="red"?"red":dp.dutyStatus==="amber"||dp.flightStatus==="amber"?"amber":"green";
