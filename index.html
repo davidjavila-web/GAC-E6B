@@ -4059,7 +4059,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.52";
+const APP_VERSION = "1.53";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 const GV = {
@@ -10549,6 +10549,30 @@ function fmtEpochT(ms, z) {
   const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
   return `${d.getDate()} ${mon} ${hh}:${mm}${z ? "Z" : "L"}`;
 }
+const _p2 = n => String(n).padStart(2, "0");
+const _MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// "LOCAL (ZULUz)" format from a UTC time-of-day + offset (hours, may be fractional).
+// Local is primary; Zulu in parens with lowercase z. Unknown offset → "??:?? (zz)".
+function clockLZ(utcH, utcM, off) {
+  const z = _p2(utcH) + ":" + _p2(utcM);
+  if (off === null || off === undefined) return `??:?? (${z}z)`;
+  const t = ((utcH * 60 + utcM + Math.round(off * 60)) % 1440 + 1440) % 1440;
+  return `${_p2(Math.floor(t / 60))}:${_p2(t % 60)} (${z}z)`;
+}
+// Same, for an epoch whose getHours() encodes the UTC time-of-day (the app's epoch
+// convention). Prefixes the LOCAL calendar date and shifts it across midnight.
+function epochLZ(ms, off) {
+  const d = new Date(ms),
+    utcH = d.getHours(),
+    utcM = d.getMinutes(),
+    z = _p2(utcH) + ":" + _p2(utcM);
+  if (off === null || off === undefined) return `${d.getDate()} ${_MON[d.getMonth()]} ??:?? (${z}z)`;
+  const total = utcH * 60 + utcM + Math.round(off * 60);
+  const ld = new Date(ms);
+  ld.setDate(ld.getDate() + Math.floor(total / 1440));
+  const t = (total % 1440 + 1440) % 1440;
+  return `${ld.getDate()} ${_MON[ld.getMonth()]} ${_p2(Math.floor(t / 60))}:${_p2(t % 60)} (${z}z)`;
+}
 function fmtHM(mins) {
   const h = Math.floor(mins / 60);
   const m = Math.round(mins % 60);
@@ -10755,6 +10779,7 @@ function FlightDutyCalc() {
   const [crewMode, setCrewMode] = useState(2);
   const [crewOverrides, setCrewOverrides] = useState({}); // { [dpIndex]: crewMode } — per-duty-period crew config
   const [dutyInputMode, setDutyInputMode] = useState("import"); // "import" or "manual"
+  const [manualImport, setManualImport] = useState(false); // capture panel open within manual entry
   const [manualLegs, setManualLegs] = useState([{
     origin: "",
     dest: "",
@@ -10835,10 +10860,17 @@ function FlightDutyCalc() {
       setImportMsg("Parsing trip data...");
       const p = parseDutyTrip(text);
       if (p && p.legs && p.legs.length > 0) {
-        const thumb = pastedImg;
-        ingestParsed(p, thumb, text);
-        setPastedImg(null);
-        setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " added · " + parsedRef.current.legs.length + " total");
+        if (dutyModeRef.current === "manual") {
+          appendParsedToManual(p);
+          setPastedImg(null);
+          setManualImport(false);
+          setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " appended to manual entry");
+        } else {
+          const thumb = pastedImg;
+          ingestParsed(p, thumb, text);
+          setPastedImg(null);
+          setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " added · " + parsedRef.current.legs.length + " total");
+        }
         setTimeout(() => setImportMsg(""), 4000);
       } else {
         // Couldn't auto-parse — dump OCR text into textarea for manual review
@@ -10900,8 +10932,14 @@ function FlightDutyCalc() {
       // Try to parse the extracted text
       const p = parseDutyTrip(allText);
       if (p && p.legs && p.legs.length > 0) {
-        ingestParsed(p);
-        setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " added · " + parsedRef.current.legs.length + " total");
+        if (dutyModeRef.current === "manual") {
+          appendParsedToManual(p);
+          setManualImport(false);
+          setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " appended to manual entry");
+        } else {
+          ingestParsed(p);
+          setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " added · " + parsedRef.current.legs.length + " total");
+        }
         setTimeout(() => setImportMsg(""), 4000);
       } else {
         // Couldn't auto-parse, but put the text in the textarea for manual editing
@@ -10942,8 +10980,14 @@ function FlightDutyCalc() {
       setImportMsg("Parsing trip data...");
       const p = parseDutyTrip(text);
       if (p && p.legs && p.legs.length > 0) {
-        ingestParsed(p, dataUrl, text);
-        setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " added · " + parsedRef.current.legs.length + " total");
+        if (dutyModeRef.current === "manual") {
+          appendParsedToManual(p);
+          setManualImport(false);
+          setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " appended to manual entry");
+        } else {
+          ingestParsed(p, dataUrl, text);
+          setImportMsg("✅ " + p.legs.length + " leg" + (p.legs.length > 1 ? "s" : "") + " added · " + parsedRef.current.legs.length + " total");
+        }
         setTimeout(() => setImportMsg(""), 4000);
       } else {
         // Couldn't auto-parse — put OCR text in textarea for manual review
@@ -10979,6 +11023,12 @@ function FlightDutyCalc() {
   useEffect(() => {
     parsedRef.current = parsed;
   }, [parsed]);
+  // Ref mirror of the input mode so async OCR handlers route a freshly-parsed result
+  // to the right sink (manual-entry append vs import-preview ingest).
+  const dutyModeRef = useRef(dutyInputMode);
+  useEffect(() => {
+    dutyModeRef.current = dutyInputMode;
+  }, [dutyInputMode]);
 
   // Append a freshly-parsed result's legs to the accumulated list (instead of
   // replacing). Recomputes needDate/unknown ICAOs over the COMBINED list. `thumb`
@@ -11377,40 +11427,55 @@ function FlightDutyCalc() {
     setOcrTexts([]);
     setOpenOcr(null);
     setAddingMore(false);
+    setManualImport(false);
+  }
+
+  // Convert one parsed leg (canonical UTC + metadata) into a manual-entry card,
+  // preserving date, Z/L mode and crew config. Shared by editLegs (results → cards)
+  // and appendParsedToManual (screenshot import while in manual entry).
+  function parsedLegToManual(l) {
+    const monthNames = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+    const depT = l.depH === null || l.depH === undefined ? "" : String(l.depH).padStart(2, "0") + ":" + String(l.depM).padStart(2, "0");
+    const arrT = l.arrH === null || l.arrH === undefined ? "" : String(l.arrH).padStart(2, "0") + ":" + String(l.arrM).padStart(2, "0");
+    let dateStr = "";
+    if (l.date) {
+      const mi = monthNames.indexOf(l.date.month);
+      if (mi > 0) dateStr = "20" + String(l.date.year2).padStart(2, "0") + "-" + String(mi).padStart(2, "0") + "-" + String(l.date.day).padStart(2, "0");
+    }
+    // Parsed times are canonical UTC. Restore the leg's original Z/L mode: local-
+    // sourced legs (manual L entry or crew-schedule "0530L" times) reopen in L mode;
+    // UTC sources (ARINCDirect duty parser) default to Z. Crew-schedule legs carry
+    // the ORIGINAL local times (origLocalDep/Arr) so we show exactly what was on the
+    // screenshot rather than re-deriving from UTC; otherwise derive local from UTC.
+    const isLocal = l.isLocal === true;
+    const mode = isLocal ? "L" : "Z";
+    const depInput = isLocal ? l.origLocalDep || localFromUtc(depT, tzOffsetFor(l.origin, l.date) || 0) : depT;
+    const arrInput = isLocal ? l.origLocalArr || localFromUtc(arrT, tzOffsetFor(l.dest, l.date) || 0) : arrT;
+    return {
+      origin: l.origin || "",
+      dest: l.dest || "",
+      depTime: depT,
+      arrTime: arrT,
+      depInput,
+      arrInput,
+      date: dateStr,
+      mode,
+      crewMode: l.crewMode || crewMode
+    };
+  }
+  // Append screenshot-parsed legs to the manual-entry list. Never wipes entered legs —
+  // only replaces a single still-blank placeholder card; otherwise appends to the bottom.
+  function appendParsedToManual(p) {
+    if (!p || !p.legs || !p.legs.length) return;
+    const cards = p.legs.map(parsedLegToManual);
+    setManualLegs(ls => {
+      const isBlank = ls.length === 1 && !ls[0].origin && !ls[0].dest && !ls[0].depTime && !ls[0].arrTime;
+      return isBlank ? cards : [...ls, ...cards];
+    });
   }
   function editLegs() {
     if (!parsed) return;
-    const monthNames = ["", "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-    const mLegs = parsed.legs.map(l => {
-      const depT = l.depH === null || l.depH === undefined ? "" : String(l.depH).padStart(2, "0") + ":" + String(l.depM).padStart(2, "0");
-      const arrT = l.arrH === null || l.arrH === undefined ? "" : String(l.arrH).padStart(2, "0") + ":" + String(l.arrM).padStart(2, "0");
-      let dateStr = "";
-      if (l.date) {
-        const mi = monthNames.indexOf(l.date.month);
-        if (mi > 0) dateStr = "20" + String(l.date.year2).padStart(2, "0") + "-" + String(mi).padStart(2, "0") + "-" + String(l.date.day).padStart(2, "0");
-      }
-      // Parsed times are canonical UTC. Restore the leg's original Z/L mode: local-
-      // sourced legs (manual L entry or crew-schedule "0530L" times) reopen in L mode;
-      // UTC sources (ARINCDirect duty parser) default to Z. Crew-schedule legs carry
-      // the ORIGINAL local times (origLocalDep/Arr) so we show exactly what was on the
-      // screenshot rather than re-deriving from UTC; otherwise derive local from UTC.
-      const isLocal = l.isLocal === true;
-      const mode = isLocal ? "L" : "Z";
-      const depInput = isLocal ? l.origLocalDep || localFromUtc(depT, tzOffsetFor(l.origin, l.date) || 0) : depT;
-      const arrInput = isLocal ? l.origLocalArr || localFromUtc(arrT, tzOffsetFor(l.dest, l.date) || 0) : arrT;
-      return {
-        origin: l.origin || "",
-        dest: l.dest || "",
-        depTime: depT,
-        arrTime: arrT,
-        depInput,
-        arrInput,
-        date: dateStr,
-        mode,
-        crewMode: l.crewMode || crewMode
-      };
-    });
-    setManualLegs(mLegs);
+    setManualLegs(parsed.legs.map(parsedLegToManual));
     setDutyInputMode("manual");
     setParsed(null);
     parsedRef.current = null;
@@ -11493,6 +11558,8 @@ function FlightDutyCalc() {
     onClick: () => {
       setDutyInputMode(m);
       setParseError("");
+      setManualImport(false);
+      setPastedImg(null);
     },
     style: {
       flex: 1,
@@ -11787,10 +11854,15 @@ function FlightDutyCalc() {
         cursor: "pointer"
       }
     }, n, " Pilot")))));
-  }), /*#__PURE__*/React.createElement("button", {
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
     onClick: addManualLeg,
     style: {
-      width: "100%",
+      flex: 1,
       padding: 10,
       borderRadius: 8,
       border: "1.5px dashed " + C.accent + "66",
@@ -11800,7 +11872,137 @@ function FlightDutyCalc() {
       fontWeight: 700,
       cursor: "pointer"
     }
-  }, "+ Add Leg")), !result && dutyInputMode === "import" && (!parsed || addingMore) && /*#__PURE__*/React.createElement("div", {
+  }, "+ Add Leg"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setManualImport(v => !v);
+      setParseError("");
+    },
+    style: {
+      flex: 1,
+      padding: 10,
+      borderRadius: 8,
+      border: "1.5px dashed " + C.accent + "66",
+      background: manualImport ? C.accent + "12" : "transparent",
+      color: C.accent,
+      fontSize: 13,
+      fontWeight: 700,
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDCF7 Import Screenshot")), manualImport && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      background: C.bg,
+      border: "1.5px solid " + C.accent + "55",
+      borderRadius: 12,
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: C.text
+    }
+  }, "\uD83D\uDCF7 Import Screenshot \u2192 appends to legs"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setManualImport(false);
+      setPastedImg(null);
+    },
+    style: {
+      background: "transparent",
+      border: "none",
+      color: C.muted,
+      fontSize: 11,
+      fontWeight: 700,
+      cursor: "pointer"
+    }
+  }, "Done \u2715")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => camRef.current?.click(),
+    disabled: importing,
+    style: {
+      flex: 1,
+      background: C.card,
+      border: "1px solid " + C.border,
+      borderRadius: 8,
+      padding: "10px 6px",
+      color: C.muted,
+      fontSize: 12,
+      fontWeight: 600,
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDCF7 Camera"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => imgRef.current?.click(),
+    disabled: importing,
+    style: {
+      flex: 1,
+      background: C.card,
+      border: "1px solid " + C.border,
+      borderRadius: 8,
+      padding: "10px 6px",
+      color: C.muted,
+      fontSize: 12,
+      fontWeight: 600,
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDDBC\uFE0F Photo"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => pdfRef.current?.click(),
+    disabled: importing,
+    style: {
+      flex: 1,
+      background: C.card,
+      border: "1px solid " + C.border,
+      borderRadius: 8,
+      padding: "10px 6px",
+      color: C.muted,
+      fontSize: 12,
+      fontWeight: 600,
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDCC4 PDF")), /*#__PURE__*/React.createElement("div", {
+    ref: pasteBoxRef,
+    contentEditable: true,
+    suppressContentEditableWarning: true,
+    onPaste: handlePasteFromBox,
+    style: {
+      background: C.card,
+      border: "2px dashed " + C.accent + "55",
+      borderRadius: 10,
+      padding: "16px 14px",
+      color: C.muted,
+      fontSize: 13,
+      textAlign: "center",
+      minHeight: 40,
+      outline: "none",
+      cursor: "text",
+      WebkitUserSelect: "text",
+      userSelect: "text",
+      lineHeight: 1.5
+    },
+    onFocus: e => {
+      e.currentTarget.style.borderColor = C.accent;
+      e.currentTarget.style.background = C.accent + "08";
+    }
+  }, "\uD83D\uDCCB Tap here, then long-press \u2192 Paste screenshot"), (importing || importMsg) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      fontSize: 12,
+      fontWeight: 600,
+      textAlign: "center",
+      color: importMsg.startsWith("✅") ? C.green : importMsg.startsWith("❌") ? C.red : C.accent
+    }
+  }, importing ? importMsg || "Processing..." : importMsg))), !result && dutyInputMode === "import" && (!parsed || addingMore) && /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.card,
       border: "1.5px solid " + C.accent + "55",
@@ -12184,31 +12386,15 @@ function FlightDutyCalc() {
       WebkitAppearance: "none"
     }
   }))), parsed.legs.map((leg, i) => {
-    // Local times for verification against the screenshot: convert canonical UTC
-    // back to local using each endpoint's DST-aware offset for the leg's date.
-    // Unknown offset → "—".
-    const fmtClock = t => {
-      const x = (t % 1440 + 1440) % 1440;
-      return String(Math.floor(x / 60)).padStart(2, "0") + ":" + String(x % 60).padStart(2, "0");
-    };
-    let depLocal = "—",
-      arrLocal = "—";
-    if (!leg.needsTimes) {
-      const dOff = tzOffsetFor(leg.origin, leg.date),
-        aOff = tzOffsetFor(leg.dest, leg.date);
-      depLocal = dOff === null ? "—" : fmtClock(leg.depH * 60 + leg.depM + Math.round(dOff * 60));
-      arrLocal = aOff === null ? "—" : fmtClock(leg.arrH * 60 + leg.arrM + Math.round(aOff * 60));
-    }
+    // One compact line per leg in "LOCAL (ZULUz)" format for verification against
+    // the screenshot. Local primary (DST-aware per leg date), Zulu in parens.
     return /*#__PURE__*/React.createElement("div", {
       key: i,
-      style: {
-        marginBottom: 6
-      }
-    }, /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         alignItems: "center",
         gap: 8,
+        marginBottom: 5,
         fontSize: 12,
         flexWrap: "wrap"
       }
@@ -12228,11 +12414,11 @@ function FlightDutyCalc() {
         color: C.gold,
         fontWeight: 700
       }
-    }, "??:??\u2013??:??") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    }, "??:?? \u2013 ??:??") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
       style: {
         color: C.muted
       }
-    }, String(leg.depH).padStart(2, "0"), ":", String(leg.depM).padStart(2, "0"), "\u2013", String(leg.arrH).padStart(2, "0"), ":", String(leg.arrM).padStart(2, "0"), " UTC"), /*#__PURE__*/React.createElement("span", {
+    }, clockLZ(leg.depH, leg.depM, tzOffsetFor(leg.origin, leg.date)), " \u2013 ", clockLZ(leg.arrH, leg.arrM, tzOffsetFor(leg.dest, leg.date))), /*#__PURE__*/React.createElement("span", {
       style: {
         color: C.gold
       }
@@ -12263,14 +12449,7 @@ function FlightDutyCalc() {
         borderRadius: 4,
         fontWeight: 700
       }
-    }, "REST")), !leg.needsTimes && /*#__PURE__*/React.createElement("div", {
-      style: {
-        fontSize: 10,
-        color: C.sub,
-        marginLeft: 26,
-        marginTop: 1
-      }
-    }, depLocal, " ", leg.origin, " \u2192 ", arrLocal, " ", leg.dest, " local"));
+    }, "REST"));
   }), !addingMore && dutyInputMode === "import" && /*#__PURE__*/React.createElement("button", {
     onClick: addAnotherScreenshot,
     style: {
@@ -12635,30 +12814,12 @@ function FlightDutyCalc() {
         fontSize: 11,
         color: C.muted
       }
-    }, mixedCrew ? "varies by duty period" : hdrLim.reg)), /*#__PURE__*/React.createElement("div", {
+    }, mixedCrew ? "varies by duty period" : hdrLim.reg)), /*#__PURE__*/React.createElement("span", {
       style: {
-        display: "flex",
-        gap: 0,
-        background: C.bg,
-        borderRadius: 7,
-        padding: 2,
-        border: "1px solid " + C.border
+        fontSize: 10,
+        color: C.muted
       }
-    }, ["local", "zulu"].map(m => /*#__PURE__*/React.createElement("button", {
-      key: m,
-      onClick: () => setTimeMode(m),
-      style: {
-        padding: "4px 10px",
-        borderRadius: 5,
-        border: "none",
-        background: timeMode === m ? C.accent + "22" : "transparent",
-        color: timeMode === m ? C.accent : C.muted,
-        fontSize: 11,
-        fontWeight: 700,
-        cursor: "pointer",
-        textTransform: "uppercase"
-      }
-    }, m === "local" ? "LCL" : "UTC")))), result.violations.length > 0 && /*#__PURE__*/React.createElement("div", {
+    }, "local (zuluz)")), result.violations.length > 0 && /*#__PURE__*/React.createElement("div", {
       style: {
         background: C.red + "12",
         border: "2px solid " + C.red + "44",
@@ -12823,37 +12984,43 @@ function FlightDutyCalc() {
           gap: 8,
           marginBottom: 10
         }
-      }, [{
-        l: "Duty On",
-        v: fmtEpochT(dp.dutyStart, timeMode === "zulu")
-      }, {
-        l: "Duty Off",
-        v: fmtEpochT(dp.dutyEnd, timeMode === "zulu")
-      }].map(({
-        l,
-        v
-      }) => /*#__PURE__*/React.createElement("div", {
-        key: l,
-        style: {
-          background: C.bg,
-          borderRadius: 8,
-          padding: "8px 10px"
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          fontSize: 9,
-          color: C.muted,
-          textTransform: "uppercase",
-          letterSpacing: .4
-        }
-      }, l), /*#__PURE__*/React.createElement("div", {
-        style: {
-          fontSize: 13,
-          fontWeight: 700,
-          color: C.text,
-          marginTop: 2
-        }
-      }, v)))), /*#__PURE__*/React.createElement("div", {
+      }, (() => {
+        const fl = dp.legs[0],
+          ll = dp.legs[dp.legs.length - 1];
+        const onOff = tzOffsetFor(fl.origin, fl.date),
+          offOff = tzOffsetFor(ll.dest, ll.date);
+        return [{
+          l: "Duty On",
+          v: epochLZ(dp.dutyStart, onOff)
+        }, {
+          l: "Duty Off",
+          v: epochLZ(dp.dutyEnd, offOff)
+        }].map(({
+          l,
+          v
+        }) => /*#__PURE__*/React.createElement("div", {
+          key: l,
+          style: {
+            background: C.bg,
+            borderRadius: 8,
+            padding: "8px 10px"
+          }
+        }, /*#__PURE__*/React.createElement("div", {
+          style: {
+            fontSize: 9,
+            color: C.muted,
+            textTransform: "uppercase",
+            letterSpacing: .4
+          }
+        }, l), /*#__PURE__*/React.createElement("div", {
+          style: {
+            fontSize: 12,
+            fontWeight: 700,
+            color: C.text,
+            marginTop: 2
+          }
+        }, v)));
+      })()), /*#__PURE__*/React.createElement("div", {
         style: {
           marginBottom: 10
         }
@@ -13026,7 +13193,8 @@ function FlightDutyCalc() {
           gap: 6,
           padding: "6px 0",
           borderTop: li > 0 ? "1px solid " + C.border : "none",
-          fontSize: 12
+          fontSize: 11,
+          flexWrap: "wrap"
         }
       }, /*#__PURE__*/React.createElement("span", {
         style: {
@@ -13045,7 +13213,7 @@ function FlightDutyCalc() {
           flex: 1,
           textAlign: "right"
         }
-      }, String(leg.depH).padStart(2, "0"), ":", String(leg.depM).padStart(2, "0"), "\u2013", String(leg.arrH).padStart(2, "0"), ":", String(leg.arrM).padStart(2, "0")), /*#__PURE__*/React.createElement("span", {
+      }, clockLZ(leg.depH, leg.depM, tzOffsetFor(leg.origin, leg.date)), " \u2013 ", clockLZ(leg.arrH, leg.arrM, tzOffsetFor(leg.dest, leg.date))), /*#__PURE__*/React.createElement("span", {
         style: {
           color: C.gold,
           fontWeight: 700,
@@ -13151,7 +13319,9 @@ function FlightDutyCalc() {
     }, (() => {
       const last = result.dutyResults.length > 0 ? result.dutyResults[result.dutyResults.length - 1] : null;
       const ra = last ? last.restAfter : limits.restAfter;
-      return `Minimum ${ra} hrs before next duty (${last ? last.limits.label : limits.label} rest after)` + (last ? ` · Available at ${fmtEpochT(last.dutyEnd + ra * 3600000, timeMode === "zulu")}` : "");
+      const ll = last ? last.legs[last.legs.length - 1] : null;
+      const offOff = ll ? tzOffsetFor(ll.dest, ll.date) : null;
+      return `Minimum ${ra} hrs before next duty (${last ? last.limits.label : limits.label} rest after)` + (last ? ` · Available at ${epochLZ(last.dutyEnd + ra * 3600000, offOff)}` : "");
     })())))), /*#__PURE__*/React.createElement("button", {
       onClick: () => setShowExplain(!showExplain),
       style: {
@@ -13472,8 +13642,6 @@ function FlightDutyCalc() {
             padding: "10px 12px"
           }
         }, dp.legs.map((leg, li) => {
-          const dl = localStr(leg.depH, leg.depM, leg.origin, leg.date);
-          const al = localStr(leg.arrH, leg.arrM, leg.dest, leg.date);
           const globalIdx = result.allLegs.findIndex(a => a.depEpoch === leg.depEpoch && a.origin === leg.origin && a.dest === leg.dest);
           const lc = dutyLegColor(globalIdx >= 0 ? globalIdx : li);
           return /*#__PURE__*/React.createElement("div", {
@@ -13530,21 +13698,9 @@ function FlightDutyCalc() {
             style: {
               fontSize: 11,
               color: C.sub,
-              fontFamily: "ui-monospace,Menlo,monospace",
-              marginBottom: dl && al ? 2 : 0
-            }
-          }, utcStr(leg.depH, leg.depM), " \u2013 ", utcStr(leg.arrH, leg.arrM), " ", /*#__PURE__*/React.createElement("span", {
-            style: {
-              color: C.muted,
-              fontSize: 10
-            }
-          }, "(UTC)")), dl && al && /*#__PURE__*/React.createElement("div", {
-            style: {
-              fontSize: 11,
-              color: C.sub,
               fontFamily: "ui-monospace,Menlo,monospace"
             }
-          }, dl, " ", leg.origin, " local \u2192 ", al, " ", leg.dest, " local"));
+          }, clockLZ(leg.depH, leg.depM, tzOffsetFor(leg.origin, leg.date)), " ", leg.origin, " \u2192 ", clockLZ(leg.arrH, leg.arrM, tzOffsetFor(leg.dest, leg.date)), " ", leg.dest));
         })), /*#__PURE__*/React.createElement("div", {
           style: {
             padding: "0 12px 10px"

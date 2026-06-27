@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.52";
+const APP_VERSION="1.53";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2815,6 +2815,26 @@ function resolveLegTimes(legs){
   return resolved;
 }
 function fmtEpochT(ms,z){const d=new Date(ms);const hh=String(d.getHours()).padStart(2,"0");const mm=String(d.getMinutes()).padStart(2,"0");const mon=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()];return`${d.getDate()} ${mon} ${hh}:${mm}${z?"Z":"L"}`;}
+const _p2=n=>String(n).padStart(2,"0");
+const _MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+// "LOCAL (ZULUz)" format from a UTC time-of-day + offset (hours, may be fractional).
+// Local is primary; Zulu in parens with lowercase z. Unknown offset → "??:?? (zz)".
+function clockLZ(utcH,utcM,off){
+  const z=_p2(utcH)+":"+_p2(utcM);
+  if(off===null||off===undefined)return`??:?? (${z}z)`;
+  const t=((utcH*60+utcM+Math.round(off*60))%1440+1440)%1440;
+  return`${_p2(Math.floor(t/60))}:${_p2(t%60)} (${z}z)`;
+}
+// Same, for an epoch whose getHours() encodes the UTC time-of-day (the app's epoch
+// convention). Prefixes the LOCAL calendar date and shifts it across midnight.
+function epochLZ(ms,off){
+  const d=new Date(ms),utcH=d.getHours(),utcM=d.getMinutes(),z=_p2(utcH)+":"+_p2(utcM);
+  if(off===null||off===undefined)return`${d.getDate()} ${_MON[d.getMonth()]} ??:?? (${z}z)`;
+  const total=utcH*60+utcM+Math.round(off*60);
+  const ld=new Date(ms);ld.setDate(ld.getDate()+Math.floor(total/1440));
+  const t=((total%1440)+1440)%1440;
+  return`${ld.getDate()} ${_MON[ld.getMonth()]} ${_p2(Math.floor(t/60))}:${_p2(t%60)} (${z}z)`;
+}
 function fmtHM(mins){const h=Math.floor(mins/60);const m=Math.round(mins%60);return`${h}:${String(m).padStart(2,"0")}`;}
 function fmtHrs2(hrs){const h=Math.floor(hrs);const m=Math.round((hrs-h)*60);return`${h}:${String(m).padStart(2,"0")}`;}
 
@@ -2909,6 +2929,7 @@ function FlightDutyCalc(){
   const[crewMode,setCrewMode]=useState(2);
   const[crewOverrides,setCrewOverrides]=useState({}); // { [dpIndex]: crewMode } — per-duty-period crew config
   const[dutyInputMode,setDutyInputMode]=useState("import"); // "import" or "manual"
+  const[manualImport,setManualImport]=useState(false); // capture panel open within manual entry
   const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:"",mode:"Z",crewMode:2}]);
   const[pasteText,setPasteText]=useState("");
   const[parseError,setParseError]=useState("");
@@ -2967,10 +2988,15 @@ function FlightDutyCalc(){
       setImportMsg("Parsing trip data...");
       const p=parseDutyTrip(text);
       if(p&&p.legs&&p.legs.length>0){
-        const thumb=pastedImg;
-        ingestParsed(p,thumb,text);
-        setPastedImg(null);
-        setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
+        if(dutyModeRef.current==="manual"){
+          appendParsedToManual(p);setPastedImg(null);setManualImport(false);
+          setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" appended to manual entry");
+        }else{
+          const thumb=pastedImg;
+          ingestParsed(p,thumb,text);
+          setPastedImg(null);
+          setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
+        }
         setTimeout(()=>setImportMsg(""),4000);
       }else{
         // Couldn't auto-parse — dump OCR text into textarea for manual review
@@ -3026,8 +3052,13 @@ function FlightDutyCalc(){
       // Try to parse the extracted text
       const p=parseDutyTrip(allText);
       if(p&&p.legs&&p.legs.length>0){
-        ingestParsed(p);
-        setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
+        if(dutyModeRef.current==="manual"){
+          appendParsedToManual(p);setManualImport(false);
+          setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" appended to manual entry");
+        }else{
+          ingestParsed(p);
+          setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
+        }
         setTimeout(()=>setImportMsg(""),4000);
       }else{
         // Couldn't auto-parse, but put the text in the textarea for manual editing
@@ -3059,8 +3090,13 @@ function FlightDutyCalc(){
       setImportMsg("Parsing trip data...");
       const p=parseDutyTrip(text);
       if(p&&p.legs&&p.legs.length>0){
-        ingestParsed(p,dataUrl,text);
-        setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
+        if(dutyModeRef.current==="manual"){
+          appendParsedToManual(p);setManualImport(false);
+          setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" appended to manual entry");
+        }else{
+          ingestParsed(p,dataUrl,text);
+          setImportMsg("✅ "+p.legs.length+" leg"+(p.legs.length>1?"s":"")+" added · "+parsedRef.current.legs.length+" total");
+        }
         setTimeout(()=>setImportMsg(""),4000);
       }else{
         // Couldn't auto-parse — put OCR text in textarea for manual review
@@ -3092,6 +3128,10 @@ function FlightDutyCalc(){
   // Ref mirror of `parsed` so back-to-back ingests read the freshest leg list.
   const parsedRef=useRef(null);
   useEffect(()=>{parsedRef.current=parsed;},[parsed]);
+  // Ref mirror of the input mode so async OCR handlers route a freshly-parsed result
+  // to the right sink (manual-entry append vs import-preview ingest).
+  const dutyModeRef=useRef(dutyInputMode);
+  useEffect(()=>{dutyModeRef.current=dutyInputMode;},[dutyInputMode]);
 
   // Append a freshly-parsed result's legs to the accumulated list (instead of
   // replacing). Recomputes needDate/unknown ICAOs over the COMBINED list. `thumb`
@@ -3335,31 +3375,44 @@ function FlightDutyCalc(){
   function handleOffsetChange(pi,field,val){setCustomOffsets(prev=>({...prev,[pi]:{...(prev[pi]||{on:Number(dutyOnDef)||0,off:Number(dutyOffDef)||0}),[field]:Number(val)}}));}
   function statusColor(s){return s==="red"?C.red:s==="amber"?C.gold:C.green;}
   function statusLabel(s){return s==="red"?"EXCEEDED":s==="amber"?"CAUTION":"OK";}
-  function resetAll(){setParsed(null);parsedRef.current=null;setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);setThumbs([]);setOcrTexts([]);setOpenOcr(null);setAddingMore(false);}
+  function resetAll(){setParsed(null);parsedRef.current=null;setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);setThumbs([]);setOcrTexts([]);setOpenOcr(null);setAddingMore(false);setManualImport(false);}
 
+  // Convert one parsed leg (canonical UTC + metadata) into a manual-entry card,
+  // preserving date, Z/L mode and crew config. Shared by editLegs (results → cards)
+  // and appendParsedToManual (screenshot import while in manual entry).
+  function parsedLegToManual(l){
+    const monthNames=["","JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+    const depT=l.depH===null||l.depH===undefined?"":String(l.depH).padStart(2,"0")+":"+String(l.depM).padStart(2,"0");
+    const arrT=l.arrH===null||l.arrH===undefined?"":String(l.arrH).padStart(2,"0")+":"+String(l.arrM).padStart(2,"0");
+    let dateStr="";
+    if(l.date){
+      const mi=monthNames.indexOf(l.date.month);
+      if(mi>0)dateStr="20"+String(l.date.year2).padStart(2,"0")+"-"+String(mi).padStart(2,"0")+"-"+String(l.date.day).padStart(2,"0");
+    }
+    // Parsed times are canonical UTC. Restore the leg's original Z/L mode: local-
+    // sourced legs (manual L entry or crew-schedule "0530L" times) reopen in L mode;
+    // UTC sources (ARINCDirect duty parser) default to Z. Crew-schedule legs carry
+    // the ORIGINAL local times (origLocalDep/Arr) so we show exactly what was on the
+    // screenshot rather than re-deriving from UTC; otherwise derive local from UTC.
+    const isLocal=l.isLocal===true;
+    const mode=isLocal?"L":"Z";
+    const depInput=isLocal?(l.origLocalDep||localFromUtc(depT,tzOffsetFor(l.origin,l.date)||0)):depT;
+    const arrInput=isLocal?(l.origLocalArr||localFromUtc(arrT,tzOffsetFor(l.dest,l.date)||0)):arrT;
+    return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode};
+  }
+  // Append screenshot-parsed legs to the manual-entry list. Never wipes entered legs —
+  // only replaces a single still-blank placeholder card; otherwise appends to the bottom.
+  function appendParsedToManual(p){
+    if(!p||!p.legs||!p.legs.length)return;
+    const cards=p.legs.map(parsedLegToManual);
+    setManualLegs(ls=>{
+      const isBlank=ls.length===1&&!ls[0].origin&&!ls[0].dest&&!ls[0].depTime&&!ls[0].arrTime;
+      return isBlank?cards:[...ls,...cards];
+    });
+  }
   function editLegs(){
     if(!parsed)return;
-    const monthNames=["","JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-    const mLegs=parsed.legs.map(l=>{
-      const depT=l.depH===null||l.depH===undefined?"":String(l.depH).padStart(2,"0")+":"+String(l.depM).padStart(2,"0");
-      const arrT=l.arrH===null||l.arrH===undefined?"":String(l.arrH).padStart(2,"0")+":"+String(l.arrM).padStart(2,"0");
-      let dateStr="";
-      if(l.date){
-        const mi=monthNames.indexOf(l.date.month);
-        if(mi>0)dateStr="20"+String(l.date.year2).padStart(2,"0")+"-"+String(mi).padStart(2,"0")+"-"+String(l.date.day).padStart(2,"0");
-      }
-      // Parsed times are canonical UTC. Restore the leg's original Z/L mode: local-
-      // sourced legs (manual L entry or crew-schedule "0530L" times) reopen in L mode;
-      // UTC sources (ARINCDirect duty parser) default to Z. Crew-schedule legs carry
-      // the ORIGINAL local times (origLocalDep/Arr) so we show exactly what was on the
-      // screenshot rather than re-deriving from UTC; otherwise derive local from UTC.
-      const isLocal=l.isLocal===true;
-      const mode=isLocal?"L":"Z";
-      const depInput=isLocal?(l.origLocalDep||localFromUtc(depT,tzOffsetFor(l.origin,l.date)||0)):depT;
-      const arrInput=isLocal?(l.origLocalArr||localFromUtc(arrT,tzOffsetFor(l.dest,l.date)||0)):arrT;
-      return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode};
-    });
-    setManualLegs(mLegs);
+    setManualLegs(parsed.legs.map(parsedLegToManual));
     setDutyInputMode("manual");
     setParsed(null);parsedRef.current=null;
     setThumbs([]);setOcrTexts([]);setOpenOcr(null);setAddingMore(false);
@@ -3380,7 +3433,7 @@ function FlightDutyCalc(){
     {/* ── MODE TOGGLE ── */}
     {!result&&!parsed&&<div style={{display:"flex",gap:0,background:C.bg,borderRadius:10,padding:3,border:"1px solid "+C.border,marginBottom:14}}>
       {[{m:"import",l:"📋 Import"},{m:"manual",l:"✏️ Manual"}].map(({m,l})=>(
-        <button key={m} onClick={()=>{setDutyInputMode(m);setParseError("");}}
+        <button key={m} onClick={()=>{setDutyInputMode(m);setParseError("");setManualImport(false);setPastedImg(null);}}
           style={{flex:1,padding:"10px 8px",borderRadius:8,border:"none",background:dutyInputMode===m?C.accent:"transparent",color:dutyInputMode===m?"#fff":C.muted,fontSize:13,fontWeight:700,cursor:"pointer"}}>{l}</button>
       ))}
     </div>}
@@ -3447,10 +3500,35 @@ function FlightDutyCalc(){
           </div>
         </div>);
       })}
-      <button onClick={addManualLeg}
-        style={{width:"100%",padding:10,borderRadius:8,border:"1.5px dashed "+C.accent+"66",background:"transparent",color:C.accent,fontSize:13,fontWeight:700,cursor:"pointer"}}>
-        + Add Leg
-      </button>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={addManualLeg}
+          style={{flex:1,padding:10,borderRadius:8,border:"1.5px dashed "+C.accent+"66",background:"transparent",color:C.accent,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+          + Add Leg
+        </button>
+        <button onClick={()=>{setManualImport(v=>!v);setParseError("");}}
+          style={{flex:1,padding:10,borderRadius:8,border:"1.5px dashed "+C.accent+"66",background:manualImport?C.accent+"12":"transparent",color:C.accent,fontSize:13,fontWeight:700,cursor:"pointer"}}>
+          📷 Import Screenshot
+        </button>
+      </div>
+
+      {/* Screenshot capture panel — parsed legs APPEND to the manual list above */}
+      {manualImport&&<div style={{marginTop:10,background:C.bg,border:"1.5px solid "+C.accent+"55",borderRadius:12,padding:14}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.text}}>📷 Import Screenshot → appends to legs</div>
+          <button onClick={()=>{setManualImport(false);setPastedImg(null);}} style={{background:"transparent",border:"none",color:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>Done ✕</button>
+        </div>
+        <div style={{display:"flex",gap:8,marginBottom:10}}>
+          <button onClick={()=>camRef.current?.click()} disabled={importing} style={{flex:1,background:C.card,border:"1px solid "+C.border,borderRadius:8,padding:"10px 6px",color:C.muted,fontSize:12,fontWeight:600,cursor:"pointer"}}>📷 Camera</button>
+          <button onClick={()=>imgRef.current?.click()} disabled={importing} style={{flex:1,background:C.card,border:"1px solid "+C.border,borderRadius:8,padding:"10px 6px",color:C.muted,fontSize:12,fontWeight:600,cursor:"pointer"}}>🖼️ Photo</button>
+          <button onClick={()=>pdfRef.current?.click()} disabled={importing} style={{flex:1,background:C.card,border:"1px solid "+C.border,borderRadius:8,padding:"10px 6px",color:C.muted,fontSize:12,fontWeight:600,cursor:"pointer"}}>📄 PDF</button>
+        </div>
+        <div ref={pasteBoxRef} contentEditable suppressContentEditableWarning onPaste={handlePasteFromBox}
+          style={{background:C.card,border:"2px dashed "+C.accent+"55",borderRadius:10,padding:"16px 14px",color:C.muted,fontSize:13,textAlign:"center",minHeight:40,outline:"none",cursor:"text",WebkitUserSelect:"text",userSelect:"text",lineHeight:1.5}}
+          onFocus={e=>{e.currentTarget.style.borderColor=C.accent;e.currentTarget.style.background=C.accent+"08";}}>
+          📋 Tap here, then long-press → Paste screenshot
+        </div>
+        {(importing||importMsg)&&<div style={{marginTop:8,fontSize:12,fontWeight:600,textAlign:"center",color:importMsg.startsWith("✅")?C.green:importMsg.startsWith("❌")?C.red:C.accent}}>{importing?(importMsg||"Processing..."):importMsg}</div>}
+      </div>}
     </div>}
 
     {/* ── PASTE INPUT (top, always visible when no results) ── */}
@@ -3540,31 +3618,18 @@ function FlightDutyCalc(){
         </div>}
       </div>}
       {parsed.legs.map((leg,i)=>{
-        // Local times for verification against the screenshot: convert canonical UTC
-        // back to local using each endpoint's DST-aware offset for the leg's date.
-        // Unknown offset → "—".
-        const fmtClock=t=>{const x=((t%1440)+1440)%1440;return String(Math.floor(x/60)).padStart(2,"0")+":"+String(x%60).padStart(2,"0");};
-        let depLocal="—",arrLocal="—";
-        if(!leg.needsTimes){
-          const dOff=tzOffsetFor(leg.origin,leg.date),aOff=tzOffsetFor(leg.dest,leg.date);
-          depLocal=dOff===null?"—":fmtClock(leg.depH*60+leg.depM+Math.round(dOff*60));
-          arrLocal=aOff===null?"—":fmtClock(leg.arrH*60+leg.arrM+Math.round(aOff*60));
-        }
-        return(<div key={i} style={{marginBottom:6}}>
-          <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,flexWrap:"wrap"}}>
-            <span style={{color:C.accent,fontWeight:700,minWidth:18}}>L{i+1}</span>
-            <span style={{color:leg.needsIcaoFix?C.red:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
-            {leg.needsTimes
-              ?<span style={{color:C.gold,fontWeight:700}}>??:??–??:??</span>
-              :<><span style={{color:C.muted}}>{String(leg.depH).padStart(2,"0")}:{String(leg.depM).padStart(2,"0")}–{String(leg.arrH).padStart(2,"0")}:{String(leg.arrM).padStart(2,"0")} UTC</span>
-            <span style={{color:C.gold}}>{fmtHM(leg.flightMins)}</span></>}
-            {leg.needsIcaoFix&&<span style={{fontSize:9,background:C.red+"22",color:C.red,padding:"2px 6px",borderRadius:4,fontWeight:700}}>FIX ICAO</span>}
-            {leg.needsTimes&&<span style={{fontSize:9,background:C.gold+"22",color:C.gold,padding:"2px 6px",borderRadius:4,fontWeight:700}}>TAP EDIT</span>}
-            {leg.hasRest&&<span style={{fontSize:9,background:C.green+"22",color:C.green,padding:"2px 6px",borderRadius:4,fontWeight:700}}>REST</span>}
-          </div>
-          {!leg.needsTimes&&<div style={{fontSize:10,color:C.sub,marginLeft:26,marginTop:1}}>
-            {depLocal} {leg.origin} → {arrLocal} {leg.dest} local
-          </div>}
+        // One compact line per leg in "LOCAL (ZULUz)" format for verification against
+        // the screenshot. Local primary (DST-aware per leg date), Zulu in parens.
+        return(<div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:5,fontSize:12,flexWrap:"wrap"}}>
+          <span style={{color:C.accent,fontWeight:700,minWidth:18}}>L{i+1}</span>
+          <span style={{color:leg.needsIcaoFix?C.red:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
+          {leg.needsTimes
+            ?<span style={{color:C.gold,fontWeight:700}}>??:?? – ??:??</span>
+            :<><span style={{color:C.muted}}>{clockLZ(leg.depH,leg.depM,tzOffsetFor(leg.origin,leg.date))} – {clockLZ(leg.arrH,leg.arrM,tzOffsetFor(leg.dest,leg.date))}</span>
+          <span style={{color:C.gold}}>{fmtHM(leg.flightMins)}</span></>}
+          {leg.needsIcaoFix&&<span style={{fontSize:9,background:C.red+"22",color:C.red,padding:"2px 6px",borderRadius:4,fontWeight:700}}>FIX ICAO</span>}
+          {leg.needsTimes&&<span style={{fontSize:9,background:C.gold+"22",color:C.gold,padding:"2px 6px",borderRadius:4,fontWeight:700}}>TAP EDIT</span>}
+          {leg.hasRest&&<span style={{fontSize:9,background:C.green+"22",color:C.green,padding:"2px 6px",borderRadius:4,fontWeight:700}}>REST</span>}
         </div>);
       })}
 
@@ -3651,9 +3716,7 @@ function FlightDutyCalc(){
           <span style={{background:C.accent+"22",color:C.accent,padding:"5px 12px",borderRadius:7,fontSize:12,fontWeight:800,letterSpacing:.5}}>{mixedCrew?"MIXED CREW":hdrLim.label.toUpperCase()}</span>
           <span style={{fontSize:11,color:C.muted}}>{mixedCrew?"varies by duty period":hdrLim.reg}</span>
         </div>
-        <div style={{display:"flex",gap:0,background:C.bg,borderRadius:7,padding:2,border:"1px solid "+C.border}}>
-          {["local","zulu"].map(m=>(<button key={m} onClick={()=>setTimeMode(m)} style={{padding:"4px 10px",borderRadius:5,border:"none",background:timeMode===m?C.accent+"22":"transparent",color:timeMode===m?C.accent:C.muted,fontSize:11,fontWeight:700,cursor:"pointer",textTransform:"uppercase"}}>{m==="local"?"LCL":"UTC"}</button>))}
-        </div>
+        <span style={{fontSize:10,color:C.muted}}>local (zuluz)</span>
       </div>
 
       {result.violations.length>0&&<div style={{background:C.red+"12",border:"2px solid "+C.red+"44",borderRadius:14,padding:16,marginBottom:14}}>
@@ -3688,8 +3751,10 @@ function FlightDutyCalc(){
             ℹ️ Augmented crew: FAR 135.269(b)(2) limits each pilot to 8 hours of flight deck duty (time at the controls) in any 24 consecutive hours. This tool does not track per-pilot rotation — the crew manages seat rotation to stay within this limit.
           </div>}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-            {[{l:"Duty On",v:fmtEpochT(dp.dutyStart,timeMode==="zulu")},{l:"Duty Off",v:fmtEpochT(dp.dutyEnd,timeMode==="zulu")}].map(({l,v})=>(
-              <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4}}>{l}</div><div style={{fontSize:13,fontWeight:700,color:C.text,marginTop:2}}>{v}</div></div>))}
+            {(()=>{const fl=dp.legs[0],ll=dp.legs[dp.legs.length-1];
+              const onOff=tzOffsetFor(fl.origin,fl.date),offOff=tzOffsetFor(ll.dest,ll.date);
+              return[{l:"Duty On",v:epochLZ(dp.dutyStart,onOff)},{l:"Duty Off",v:epochLZ(dp.dutyEnd,offOff)}].map(({l,v})=>(
+                <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4}}>{l}</div><div style={{fontSize:12,fontWeight:700,color:C.text,marginTop:2}}>{v}</div></div>));})()}
           </div>
           {/* Duty bar */}
           <div style={{marginBottom:10}}>
@@ -3719,10 +3784,10 @@ function FlightDutyCalc(){
           </div>
           {/* Legs */}
           {dp.legs.map((leg,li)=>(
-            <div key={li} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderTop:li>0?"1px solid "+C.border:"none",fontSize:12}}>
+            <div key={li} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderTop:li>0?"1px solid "+C.border:"none",fontSize:11,flexWrap:"wrap"}}>
               <span style={{color:C.accent,fontWeight:700,minWidth:42}}>Leg {(result.allLegs.findIndex(al=>al.depEpoch===leg.depEpoch))+1}</span>
               <span style={{color:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
-              <span style={{color:C.muted,flex:1,textAlign:"right"}}>{String(leg.depH).padStart(2,"0")}:{String(leg.depM).padStart(2,"0")}–{String(leg.arrH).padStart(2,"0")}:{String(leg.arrM).padStart(2,"0")}</span>
+              <span style={{color:C.muted,flex:1,textAlign:"right"}}>{clockLZ(leg.depH,leg.depM,tzOffsetFor(leg.origin,leg.date))} – {clockLZ(leg.arrH,leg.arrM,tzOffsetFor(leg.dest,leg.date))}</span>
               <span style={{color:C.gold,fontWeight:700,minWidth:40,textAlign:"right"}}>{fmtHM(leg.flightMins)}</span>
             </div>))}
         </div>);
@@ -3742,7 +3807,7 @@ function FlightDutyCalc(){
         <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:18}}>🛏️</span>
           <div><div style={{fontSize:12,fontWeight:700,color:C.text}}>Required Rest After Mission</div>
             <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-              {(()=>{const last=result.dutyResults.length>0?result.dutyResults[result.dutyResults.length-1]:null;const ra=last?last.restAfter:limits.restAfter;return`Minimum ${ra} hrs before next duty (${last?last.limits.label:limits.label} rest after)`+(last?` · Available at ${fmtEpochT(last.dutyEnd+ra*3600000,timeMode==="zulu")}`:"");})()}
+              {(()=>{const last=result.dutyResults.length>0?result.dutyResults[result.dutyResults.length-1]:null;const ra=last?last.restAfter:limits.restAfter;const ll=last?last.legs[last.legs.length-1]:null;const offOff=ll?tzOffsetFor(ll.dest,ll.date):null;return`Minimum ${ra} hrs before next duty (${last?last.limits.label:limits.label} rest after)`+(last?` · Available at ${epochLZ(last.dutyEnd+ra*3600000,offOff)}`:"");})()}
             </div></div></div>
       </div>
 
@@ -3836,8 +3901,6 @@ function FlightDutyCalc(){
                   {/* Route cards */}
                   <div style={{padding:"10px 12px"}}>
                     {dp.legs.map((leg,li)=>{
-                      const dl=localStr(leg.depH,leg.depM,leg.origin,leg.date);
-                      const al=localStr(leg.arrH,leg.arrM,leg.dest,leg.date);
                       const globalIdx=result.allLegs.findIndex(a=>a.depEpoch===leg.depEpoch&&a.origin===leg.origin&&a.dest===leg.dest);
                       const lc=dutyLegColor(globalIdx>=0?globalIdx:li);
                       return(<div key={li} style={{background:C.bg,border:"1px solid "+C.border,borderLeft:"3px solid "+lc,borderRadius:10,padding:"10px 12px",marginBottom:li<dp.legs.length-1?8:0}}>
@@ -3848,12 +3911,9 @@ function FlightDutyCalc(){
                           </div>
                           <div style={{fontSize:11,color:C.muted,fontWeight:700,flexShrink:0}}>✈️ {fmtHrs2(leg.flightMins/60)}</div>
                         </div>
-                        <div style={{fontSize:11,color:C.sub,fontFamily:"ui-monospace,Menlo,monospace",marginBottom:dl&&al?2:0}}>
-                          {utcStr(leg.depH,leg.depM)} – {utcStr(leg.arrH,leg.arrM)} <span style={{color:C.muted,fontSize:10}}>(UTC)</span>
+                        <div style={{fontSize:11,color:C.sub,fontFamily:"ui-monospace,Menlo,monospace"}}>
+                          {clockLZ(leg.depH,leg.depM,tzOffsetFor(leg.origin,leg.date))} {leg.origin} → {clockLZ(leg.arrH,leg.arrM,tzOffsetFor(leg.dest,leg.date))} {leg.dest}
                         </div>
-                        {dl&&al&&<div style={{fontSize:11,color:C.sub,fontFamily:"ui-monospace,Menlo,monospace"}}>
-                          {dl} {leg.origin} local → {al} {leg.dest} local
-                        </div>}
                       </div>);
                     })}
                   </div>
