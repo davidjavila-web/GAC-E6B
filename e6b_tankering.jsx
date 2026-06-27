@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.56";
+const APP_VERSION="1.57";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3492,6 +3492,39 @@ function FlightDutyCalc(){
   }
   function statusColor(s){return s==="red"?C.red:s==="amber"?C.gold:C.green;}
   function statusLabel(s){return s==="red"?"EXCEEDED":s==="amber"?"CAUTION":"OK";}
+  // A limit bar with an explicit black limit line at a FIXED 83% of the track, room to
+  // show a hatched overage past it, status color, ACTUAL/LIMIT readout and a plain-English
+  // message. `overDetail` overrides the default over-message (used by the rolling-24 bar).
+  function renderLimitBar({key,name,scope,actualMin,limitMin,overDetail}){
+    const LX=83; // % of track where the legal limit sits
+    const ratio=limitMin>0?actualMin/limitMin:0;
+    const over=actualMin>limitMin;
+    // "within limit" stays reassuring (green) so a compliant per-period bar never reads as
+    // the violation; amber is reserved for right at the edge; red only when actually over.
+    const status=over?"red":ratio>=0.95?"amber":"green";
+    const COL={green:"#34a853",amber:"#f5a623",red:"#ea4335"}[status];
+    const solidW=Math.min(ratio,1)*LX;
+    const hatchW=over?Math.max(8,Math.min(100-LX,(ratio-1)*LX)):0;
+    const lineCol=themeIsDark()?C.light:"#0b1220";
+    let msg;
+    if(over)msg="✕ "+(overDetail||("OVER by "+fmtHM(actualMin-limitMin)));
+    else{const below=fmtHM(limitMin-actualMin),lh=Math.round(limitMin/60);msg=(status==="green"?"✓ ":"")+`${below} below the ${lh}h limit — within limits.`;}
+    return(<div key={key} style={{marginBottom:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",fontSize:11,marginBottom:14}}>
+        <span style={{color:C.text,fontWeight:700}}>{name} <span style={{color:C.muted,fontWeight:600,fontSize:9}}>· {scope}</span></span>
+        <span style={{color:COL,fontWeight:800}}>{fmtHM(actualMin)} / {fmtHM(limitMin)}</span>
+      </div>
+      <div style={{position:"relative",height:14}}>
+        <div style={{position:"absolute",inset:0,background:C.bg,borderRadius:4,overflow:"hidden"}}>
+          <div style={{position:"absolute",left:0,top:0,bottom:0,width:solidW+"%",background:COL,borderRadius:"4px 0 0 4px",transition:"width .3s"}}/>
+          {over&&<div style={{position:"absolute",left:LX+"%",top:0,bottom:0,width:hatchW+"%",backgroundImage:`repeating-linear-gradient(45deg, ${COL} 0, ${COL} 3px, ${COL}55 3px, ${COL}55 6px)`}}/>}
+        </div>
+        <div style={{position:"absolute",left:LX+"%",top:-2,bottom:-2,width:2,background:lineCol,borderRadius:1}}/>
+        <div style={{position:"absolute",left:LX+"%",top:-13,transform:"translateX(-100%)",paddingRight:3,fontSize:8,fontWeight:800,color:lineCol,whiteSpace:"nowrap"}}>limit {fmtHM(limitMin)}</div>
+      </div>
+      <div style={{fontSize:10,color:over?COL:C.muted,marginTop:6,lineHeight:1.4,fontWeight:over?700:500}}>{msg}</div>
+    </div>);
+  }
   function resetAll(){setParsed(null);parsedRef.current=null;setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);setThumbs([]);setOcrTexts([]);setOpenOcr(null);setAddingMore(false);setManualImport(false);}
 
   // Convert one parsed leg (canonical UTC + metadata) into a manual-entry card,
@@ -3917,16 +3950,32 @@ function FlightDutyCalc(){
               return[{l:"Duty On",v:epochLZ(dp.dutyStart,onOff)},{l:"Duty Off",v:epochLZ(dp.dutyEnd,offOff)}].map(({l,v})=>(
                 <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4}}>{l}</div><div style={{fontSize:12,fontWeight:700,color:C.text,marginTop:2}}>{v}</div></div>));})()}
           </div>
-          {/* Duty bar */}
-          <div style={{marginBottom:10}}>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}><span style={{color:C.muted}}>Duty</span><span style={{color:statusColor(dp.dutyStatus),fontWeight:700}}>{fmtHrs2(dp.dutyHrs)} / {dp.limits.duty}h</span></div>
-            <div style={{height:6,background:C.bg,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,dp.dutyHrs/dp.limits.duty*100)+"%",background:statusColor(dp.dutyStatus),borderRadius:3,transition:"width 0.3s"}}/></div>
-          </div>
-          {/* Flight bar */}
-          <div style={{marginBottom:10}}>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}><span style={{color:C.muted}}>Flight</span><span style={{color:statusColor(dp.flightStatus),fontWeight:700}}>{fmtHrs2(dp.flightHrs)} / {dp.limits.flight}h</span></div>
-            <div style={{height:6,background:C.bg,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:Math.min(100,dp.flightHrs/dp.limits.flight*100)+"%",background:statusColor(dp.flightStatus),borderRadius:3,transition:"width 0.3s"}}/></div>
-          </div>
+          {/* ── THIS DUTY PERIOD: duty + flight (measured within this period only) ── */}
+          {(()=>{
+            const dutyMin=Math.round(dp.dutyHrs*60),flightMin=Math.round(dp.flightHrs*60);
+            const subHead=t=>(<div style={{fontSize:9,fontWeight:800,color:C.sub,textTransform:"uppercase",letterSpacing:.7,margin:"2px 0 12px"}}>{t}</div>);
+            const rollingV=result.violations.find(v=>v.type==="rolling24"&&v.period===i);
+            // Rolling-24 scope + crossing detail (only when this period carries the worst window)
+            let rollScope="",rollDetail="";
+            if(rollingV){
+              const ps=[...new Set(rollingV.parts.map(p=>result.allLegs[p.legIdx].periodIdx))].sort((a,b)=>a-b);
+              rollScope=ps.length>1?`crosses DP${ps[0]+1}→DP${ps[ps.length-1]+1}`:`within DP${ps[0]+1}`;
+              const cd=new Date(rollingV.crossMs),zc=String(cd.getHours()).padStart(2,"0")+":"+String(cd.getMinutes()).padStart(2,"0")+"z";
+              const cleg=result.allLegs[rollingV.crossLegIdx],coff=cleg?tzOffsetFor(cleg.origin,cleg.date):null;
+              let loc="";if(coff!==null&&coff!==undefined){const t=((cd.getHours()*60+cd.getMinutes()+Math.round(coff*60))%1440+1440)%1440;loc=` (${String(Math.floor(t/60)).padStart(2,"0")}:${String(t%60).padStart(2,"0")} local)`;}
+              const win=rollingV.parts.map(p=>"Leg "+(p.legIdx+1)).join(" + ");
+              rollDetail=`OVER by ${fmtHM(rollingV.excessMin)} — crosses the ${Math.round(rollingV.limitMin/60)}h line at ${zc}${loc}, inside Leg ${rollingV.crossLegIdx+1}. Window = ${win}.`;
+            }
+            return(<>
+              {subHead("This duty period")}
+              {renderLimitBar({key:"duty",name:"Duty",scope:"this period",actualMin:dutyMin,limitMin:dp.limits.duty*60})}
+              {renderLimitBar({key:"flight",name:"Flight",scope:"this period",actualMin:flightMin,limitMin:dp.limits.flight*60})}
+              {rollingV&&<>
+                {subHead("Rolling 24-hour window (spans duty periods)")}
+                {renderLimitBar({key:"r24",name:"Rolling 24h",scope:rollScope,actualMin:rollingV.totalMin,limitMin:rollingV.limitMin,overDetail:rollDetail})}
+              </>}
+            </>);
+          })()}
           {dp.restBefore!==undefined&&(()=>{const ok=dp.restBefore>=dp.restReq;return(
             <div style={{background:(ok?C.green:C.red)+"0d",border:"1px solid "+(ok?C.green:C.red)+"33",borderRadius:8,padding:"7px 10px",marginBottom:10,fontSize:11}}>
               <div style={{display:"flex",justifyContent:"space-between"}}>
