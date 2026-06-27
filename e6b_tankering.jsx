@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.53";
+const APP_VERSION="1.54";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -3361,18 +3361,27 @@ function FlightDutyCalc(){
   // Recompute analysis in place (used when a per-duty-period crew config or the
   // global "set all" selector changes while results are showing). gMode overrides
   // the global crewMode so we don't read stale state after setCrewMode.
-  function recomputeWith(overrides,gMode){
+  function recomputeWith(overrides,gMode,offsetsArg){
     if(!parsed)return;
     let legs=[...parsed.legs];
     if(needDate&&startDay)legs[0]={...legs[0],date:{day:Number(startDay),month:startMonth,year2:Number(startYear)}};
     if(!legs[0].date)return;
     const resolved=resolveLegTimes(legs);
     const periods=groupDutyPeriods(resolved);
-    const analysis=computeDutyAnalysis(periods,gMode??crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets,overrides);
+    const analysis=computeDutyAnalysis(periods,gMode??crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,offsetsArg||customOffsets,overrides);
     setResult(analysis);
   }
 
-  function handleOffsetChange(pi,field,val){setCustomOffsets(prev=>({...prev,[pi]:{...(prev[pi]||{on:Number(dutyOnDef)||0,off:Number(dutyOffDef)||0}),[field]:Number(val)}}));}
+  // Free-text per-period duty-offset edit: sanitize to 0–999 whole minutes (blank kept
+  // as "" → treated as 0 by the engine), store as a per-period override, and live-
+  // recompute that period's Duty On/Off + duty check without clearing the results.
+  function setPeriodOffset(pi,field,rawText){
+    const clean=rawText.replace(/[^0-9]/g,"").slice(0,3);
+    const cur=customOffsets[pi]||{on:Number(dutyOnDef)||0,off:Number(dutyOffDef)||0};
+    const next={...customOffsets,[pi]:{...cur,[field]:clean===""?"":Number(clean)}};
+    setCustomOffsets(next);
+    if(result)recomputeWith(crewOverrides,undefined,next);
+  }
   function statusColor(s){return s==="red"?C.red:s==="amber"?C.gold:C.green;}
   function statusLabel(s){return s==="red"?"EXCEEDED":s==="amber"?"CAUTION":"OK";}
   function resetAll(){setParsed(null);parsedRef.current=null;setResult(null);setPasteText("");setParseError("");setNeedDate(false);setCustomOffsets({});setCrewOverrides({});setShowExplain(false);setUnknownIcaos({});setImportMsg("");setPastedImg(null);setThumbs([]);setOcrTexts([]);setOpenOcr(null);setAddingMore(false);setManualImport(false);}
@@ -3773,14 +3782,20 @@ function FlightDutyCalc(){
               </div>
               <div style={{fontSize:10,color:C.muted,marginTop:3,lineHeight:1.4}}>{dp.restAfterPrevHrs}h after {dp.restAfterPrevLabel} duty / {dp.restBeforeHrs}h before {dp.restBeforeLabel} start of next duty</div>
             </div>);})()}
-          {/* Per-duty offsets */}
+          {/* Per-duty offsets — free-text whole minutes (0–999), live-recompute this period */}
           <div style={{display:"flex",gap:8,marginBottom:10}}>
-            <div style={{flex:1}}><div style={{fontSize:9,color:C.muted,marginBottom:3}}>On offset</div>
-              <select value={customOffsets[i]?.on??dutyOnDef} onChange={e=>{handleOffsetChange(i,"on",e.target.value);setResult(null);}} style={{width:"100%",background:C.bg,border:"1px solid "+C.border,borderRadius:6,padding:"6px",color:C.text,fontSize:12}}>
-                {[30,45,60,75,90,120].map(v=><option key={v} value={v}>{v}m</option>)}</select></div>
-            <div style={{flex:1}}><div style={{fontSize:9,color:C.muted,marginBottom:3}}>Off offset</div>
-              <select value={customOffsets[i]?.off??dutyOffDef} onChange={e=>{handleOffsetChange(i,"off",e.target.value);setResult(null);}} style={{width:"100%",background:C.bg,border:"1px solid "+C.border,borderRadius:6,padding:"6px",color:C.text,fontSize:12}}>
-                {[10,15,20,30,45,60].map(v=><option key={v} value={v}>{v}m</option>)}</select></div>
+            {[{f:"on",l:"On offset",def:dutyOnDef},{f:"off",l:"Off offset",def:dutyOffDef}].map(({f,l,def})=>{
+              const cur=customOffsets[i]?.[f];
+              return(<div key={f} style={{flex:1}}>
+                <div style={{fontSize:9,color:C.muted,marginBottom:3}}>{l}</div>
+                <div style={{position:"relative"}}>
+                  <input type="text" inputMode="numeric" value={cur!==undefined?cur:def} placeholder={def}
+                    onChange={e=>setPeriodOffset(i,f,e.target.value)}
+                    style={{width:"100%",background:C.bg,border:"1px solid "+C.border,borderRadius:6,padding:"6px 32px 6px 8px",color:C.text,fontSize:12,fontWeight:700,outline:"none",boxSizing:"border-box"}}/>
+                  <span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontSize:10,color:C.muted,pointerEvents:"none"}}>min</span>
+                </div>
+              </div>);
+            })}
           </div>
           {/* Legs */}
           {dp.legs.map((leg,li)=>(
