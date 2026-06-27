@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.55";
+const APP_VERSION="1.56";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
@@ -2936,12 +2936,97 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
       const contribStr=worst.parts.map(p=>`Leg ${p.legIdx+1} ${fmtHM(p.mins)}`).join(" + ");
       const zd=new Date(worst.up),zMon=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][zd.getMonth()];
       const zwin=`${String(zd.getHours()).padStart(2,"0")}:${String(zd.getMinutes()).padStart(2,"0")}z ${zd.getDate()} ${zMon}`;
+      // EXACT crossing moment: walk the window's legs in order, accruing flight minutes;
+      // the trailing-24h total crosses the limit partway through the leg where the running
+      // sum reaches limitMin. crossMs = that leg's wheels-up + (limitMin - sumBefore).
+      let acc=0,crossMs=worst.up,crossLegIdx=worst.anchorIdx;
+      for(const p of worst.parts){
+        if(acc+p.mins>=worst.limitMin){crossMs=allLegs[p.legIdx].depEpoch+(worst.limitMin-acc)*60000;crossLegIdx=p.legIdx;break;}
+        acc+=p.mins;
+      }
       violations.push({period:worst.periodIdx,type:"rolling24",anchorIdx:worst.anchorIdx,anchorUp:worst.up,window:zwin,
         totalMin:worst.totalMin,limitMin:worst.limitMin,excessMin:worst.excess,parts:worst.parts,label:worst.label,reg:worst.reg,
+        crossMs,crossLegIdx,
         msg:`window from Leg ${worst.anchorIdx+1} wheels-up (${zwin}): ${contribStr} = ${fmtHM(worst.totalMin)}, exceeds ${fmtHM(worst.limitMin)} by ${fmtHM(worst.excess)}.`});
     }
   }
   return{dutyResults,violations,totalFlight,totalDuty,totalRest,allLegs,limits};
+}
+
+// ── Trip Timeline — true-to-scale vertical zulu calendar of the whole trip ──
+// 30px/hour. Zulu is the continuous backbone; local shown in parens where known.
+// All geometry derives from real epoch times so it stays accurate for any trip.
+function TripTimeline({result,offFor}){
+  const legs=result.allLegs;
+  if(!legs||!legs.length)return null;
+  const HOUR=30,GUT=54,LANE_L=GUT+6,LEG_L=GUT+14;
+  const dark=themeIsDark();
+  const DOW=["SUN","MON","TUE","WED","THU","FRI","SAT"],MONU=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+  const floorHour=ms=>{const d=new Date(ms);d.setMinutes(0,0,0);return d.getTime();};
+  const ceilHour=ms=>{const d=new Date(ms);if(d.getMinutes()||d.getSeconds()||d.getMilliseconds()){d.setMinutes(0,0,0);return d.getTime()+3600000;}return d.getTime();};
+  const startMs=floorHour(legs[0].depEpoch),endMs=ceilHour(legs[legs.length-1].arrEpoch);
+  const height=(endMs-startMs)/3600000*HOUR;
+  const y=ms=>(ms-startMs)/3600000*HOUR;
+  const zc=ms=>{const d=new Date(ms);return _p2(d.getHours())+":"+_p2(d.getMinutes())+"z";};
+  // Zulu primary, local in parens — the REVERSE of the results cards. No parens if unknown.
+  const zLoc=(ms,off)=>{const d=new Date(ms),z=_p2(d.getHours())+":"+_p2(d.getMinutes());
+    if(off===null||off===undefined)return z+"z";
+    const t=((d.getHours()*60+d.getMinutes()+Math.round(off*60))%1440+1440)%1440;
+    return z+"z ("+_p2(Math.floor(t/60))+":"+_p2(t%60)+")";};
+  const dayLab=ms=>{const d=new Date(ms);return DOW[d.getDay()]+" · "+d.getDate()+" "+MONU[d.getMonth()];};
+  const hours=[];for(let h=startMs;h<=endMs+1000;h+=3600000)hours.push(h);
+  const railColor=dp=>dp.dutyStatus==="red"||dp.flightStatus==="red"?C.red:dp.dutyStatus==="amber"||dp.flightStatus==="amber"?C.gold:C.green;
+  return(<div style={{position:"relative",height:height+4,marginTop:6,fontVariantNumeric:"tabular-nums"}}>
+    {/* Hour gridlines + zulu labels + midnight dividers */}
+    {hours.map((h,i)=>{const yy=y(h);const d=new Date(h);const major=d.getHours()%6===0;const mid=d.getHours()===0;
+      return(<React.Fragment key={"h"+i}>
+        <div style={{position:"absolute",left:GUT,right:0,top:yy,height:1,background:major?C.border:C.border,opacity:major?.9:.4}}/>
+        <div style={{position:"absolute",left:0,top:yy-6,width:GUT-6,textAlign:"right",fontSize:9,fontWeight:major?800:600,color:major?C.sub:C.muted}}>{zc(h)}</div>
+        {mid&&i>0&&<div style={{position:"absolute",left:LANE_L,right:8,top:yy-7,display:"flex",alignItems:"center",gap:4,zIndex:3,pointerEvents:"none"}}>
+          <div style={{flex:1,height:1,background:C.text+"40"}}/>
+          <span style={{fontSize:8,fontWeight:800,color:dark?C.light:"#fff",background:C.panel,borderRadius:4,padding:"1px 6px",whiteSpace:"nowrap"}}>00:00z · {d.getDate()} {MONU[d.getMonth()]}</span>
+          <div style={{flex:1,height:1,background:C.text+"40"}}/>
+        </div>}
+      </React.Fragment>);})}
+    {/* Start-day band */}
+    <div style={{position:"absolute",left:LANE_L,top:1,zIndex:3}}><span style={{fontSize:8,fontWeight:800,color:dark?C.light:"#fff",background:C.panel,borderRadius:4,padding:"1px 6px"}}>{dayLab(startMs)}</span></div>
+    {/* Duty-period rails */}
+    {result.dutyResults.map((dp,di)=>{const t0=y(dp.legs[0].depEpoch),t1=y(dp.legs[dp.legs.length-1].arrEpoch);
+      return<div key={"rail"+di} title={"DP"+(di+1)} style={{position:"absolute",left:LANE_L,top:t0,height:Math.max(3,t1-t0),width:4,background:railColor(dp),borderRadius:2,zIndex:1}}/>;})}
+    {/* Rest blocks (between duty periods) */}
+    {result.dutyResults.map((dp,di)=>{if(di===0||dp.restBefore===undefined)return null;
+      const prev=result.dutyResults[di-1];const pl=prev.legs[prev.legs.length-1],nl=dp.legs[0];
+      const a0=pl.arrEpoch,a1=nl.depEpoch;const top=y(a0),h=Math.max(22,y(a1)-y(a0));
+      const ok=dp.restBefore>=dp.restReq;const col=ok?C.muted:C.red;
+      return(<div key={"rest"+di} style={{position:"absolute",left:LEG_L,right:8,top,height:h,borderRadius:8,boxSizing:"border-box",overflow:"hidden",zIndex:1,
+        border:"1px "+(ok?"dashed":"solid")+" "+col+(ok?"66":""),
+        backgroundImage:`repeating-linear-gradient(45deg, ${col}${ok?"12":"22"} 0, ${col}${ok?"12":"22"} 5px, transparent 5px, transparent 11px)`,padding:"4px 8px"}}>
+        <div style={{fontSize:10,fontWeight:800,color:col}}>REST {fmtHM(Math.round(dp.restBefore*60))} {ok?"· OK":"· SHORT "+fmtHM(Math.round((dp.restReq-dp.restBefore)*60))}</div>
+        {h>=42&&<div style={{fontSize:9,color:C.sub,marginTop:1,fontFamily:"ui-monospace,Menlo,monospace",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{zLoc(a0,offFor(pl.dest,pl.date))} → {zLoc(a1,offFor(nl.origin,nl.date))}</div>}
+        {h>=56&&<div style={{fontSize:9,color:C.muted,marginTop:1}}>need {fmtHM(dp.restReq*60)} · {dp.restAfterPrevLabel} after DP{di}</div>}
+      </div>);})}
+    {/* Leg blocks */}
+    {legs.map((lg,gi)=>{const top=y(lg.depEpoch),h=Math.max(26,lg.flightMins/60*HOUR);const col=dutyLegColor(gi);
+      return(<div key={"leg"+gi} style={{position:"absolute",left:LEG_L,right:8,top,height:h,background:col,borderRadius:8,color:"#fff",padding:"3px 8px",boxSizing:"border-box",overflow:"hidden",zIndex:2,boxShadow:"0 1px 3px rgba(0,0,0,.22)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
+          <span style={{fontSize:10,fontWeight:800,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>LEG {gi+1} · {lg.origin} → {lg.dest}</span>
+          <span style={{fontSize:9,fontWeight:800,background:"rgba(255,255,255,.25)",borderRadius:4,padding:"1px 5px",whiteSpace:"nowrap",flexShrink:0}}>{fmtHM(lg.flightMins)}</span>
+        </div>
+        {h>=40&&<div style={{fontSize:9,opacity:.95,marginTop:1,fontFamily:"ui-monospace,Menlo,monospace",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{zLoc(lg.depEpoch,offFor(lg.origin,lg.date))} → {zLoc(lg.arrEpoch,offFor(lg.dest,lg.date))}</div>}
+      </div>);})}
+    {/* Exact-moment violation markers */}
+    {result.violations.map((v,vi)=>{
+      let mms=null,tag=null;
+      if(v.type==="rolling24"&&v.crossMs!=null){mms=v.crossMs;tag="⟲ rolling-24 over "+fmtHM(v.excessMin);}
+      else if(v.type==="rest"&&v.dateMs!=null){mms=v.dateMs;tag="rest short "+fmtHM(v.shortMin);}
+      if(mms==null)return null;const yy=y(mms);
+      return(<React.Fragment key={"mk"+vi}>
+        <div style={{position:"absolute",left:GUT,right:8,top:yy,height:0,borderTop:"1.5px dashed "+C.red,zIndex:5}}/>
+        <div style={{position:"absolute",left:GUT-3,top:yy-3.5,width:7,height:7,borderRadius:4,background:C.red,zIndex:6}}/>
+        <div style={{position:"absolute",left:0,top:yy-14,width:GUT-3,textAlign:"right",fontSize:9,fontWeight:800,color:C.red,zIndex:6}}>{zc(mms)}</div>
+        <div style={{position:"absolute",right:6,top:yy-7,background:C.red,color:"#fff",fontSize:8,fontWeight:800,borderRadius:4,padding:"1px 5px",zIndex:6,whiteSpace:"nowrap",boxShadow:"0 1px 2px rgba(0,0,0,.35)"}}>{tag}</div>
+      </React.Fragment>);})}
+  </div>);
 }
 
 // ── FlightDutyCalc Component ─────────────────────────────────────────────
@@ -2964,6 +3049,8 @@ function FlightDutyCalc(){
   const[customOffsets,setCustomOffsets]=useState({});
   const[result,setResult]=useState(null);
   const[showExplain,setShowExplain]=useState(false);
+  // Trip timeline: default expanded on wider screens (>=700px), collapsed on mobile.
+  const[showTimeline,setShowTimeline]=useState(()=>typeof window!=="undefined"&&window.innerWidth>=700);
   const[timeMode,setTimeMode]=useState("local");
   const[unknownIcaos,setUnknownIcaos]=useState({});
   const[sessionTz,setSessionTz]=useState({});
@@ -3788,6 +3875,18 @@ function FlightDutyCalc(){
           })}
         </div>);
       })()}
+
+      {/* ── TRIP TIMELINE (collapsible, above the duty-period cards) ── */}
+      <div style={{background:C.card,border:"1px solid "+C.border,borderRadius:12,marginBottom:14,overflow:"hidden"}}>
+        <button onClick={()=>setShowTimeline(s=>!s)} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 14px",background:"transparent",border:"none",cursor:"pointer"}}>
+          <span style={{fontSize:13,fontWeight:800,color:C.text,display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:15}}>🗓️</span>Trip Timeline</span>
+          <span style={{fontSize:12,fontWeight:700,color:C.accent}}>{showTimeline?"Hide timeline ▴":"Show timeline ▾"}</span>
+        </button>
+        {showTimeline&&<div style={{padding:"4px 12px 14px"}}>
+          <div style={{fontSize:10,color:C.muted,marginBottom:6,lineHeight:1.4}}>True-to-scale · 30px/hr · zulu backbone, local in parens. Red dashed lines mark the exact violation moments.</div>
+          <TripTimeline result={result} offFor={tzOffsetFor}/>
+        </div>}
+      </div>
 
       {result.dutyResults.map((dp,i)=>{
         const worst=dp.dutyStatus==="red"||dp.flightStatus==="red"?"red":dp.dutyStatus==="amber"||dp.flightStatus==="amber"?"amber":"green";
