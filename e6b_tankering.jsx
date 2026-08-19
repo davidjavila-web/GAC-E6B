@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.58";
+const APP_VERSION="1.59";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -377,6 +377,92 @@ async function forget(k){try{localStorage.removeItem(k);}catch{}}
 
 function newLeg(from=""){return{from,to:"",distNm:"",plannedBurnLbs:"",cruiseAltFt:"",depPrice:"",arrPrice:"",depRampFee:"",depMinPurchase:"",arrFuelAvail:true,payload:"",fobOverride:"",useOverride:false};}
 
+// ── Tanker Calc trip persistence ──────────────────────────────────────────
+// Scope is deliberately the Tanker Calc tab only — the 10/24 duty tab keeps its
+// own state and is untouched by any of this.
+const TANKER_DRAFT_KEY="e6b:tanker:draft";
+const TANKER_FILE_TYPE="tanker-trip";
+const TANKER_FILE_VERSION=1;
+// Every field of a leg that the user can edit, with the coercion needed to pull
+// it back out of a JSON file written by another device / another app version.
+const TANKER_LEG_FIELDS={
+  from:"str",to:"str",distNm:"str",plannedBurnLbs:"str",cruiseAltFt:"str",
+  depPrice:"str",arrPrice:"str",depRampFee:"str",depMinPurchase:"str",
+  payload:"str",fobOverride:"str",arrFuelAvail:"bool",useOverride:"bool",
+};
+
+// Numeric leg fields arrive as strings from the UI but as numbers from older
+// files and from the OCR importer, so normalise both to the canonical string form.
+function tankerLegFromRaw(raw){
+  const leg=newLeg();
+  if(!raw||typeof raw!=="object")return leg;
+  for(const[k,kind]of Object.entries(TANKER_LEG_FIELDS)){
+    const v=raw[k];
+    if(v===undefined||v===null)continue;
+    if(kind==="bool")leg[k]=!!v;
+    else if(k==="from"||k==="to")leg[k]=String(v).toUpperCase().slice(0,4);
+    else leg[k]=normNum(String(v));
+  }
+  return leg;
+}
+
+function tankerSnapshot(st){
+  return{
+    aircraftId:st.aircraftId,
+    currency:st.currency,
+    units:"lbs",              // fuel quantities are lbs throughout; gal/L are derived
+    globalAlt:normNum(st.globalAlt),
+    reserveFuel:normNum(st.reserveFuel),
+    initialFob:normNum(st.initialFob),
+    calculated:!!st.calculated,
+    // Canonicalised on the way out too, so an exported file never carries a
+    // half-typed "1,004" through to another device.
+    legs:st.legs.map(tankerLegFromRaw),
+  };
+}
+
+// Best effort by design: unknown keys are dropped and missing ones fall back to
+// the newLeg() defaults, so a file from a newer app version still loads.
+function tankerSnapshotToState(data,knownAircraftIds){
+  const legs=Array.isArray(data.legs)&&data.legs.length?data.legs.map(tankerLegFromRaw):[newLeg(),newLeg()];
+  const wantAc=typeof data.aircraftId==="string"?data.aircraftId:"gv";
+  const acKnown=wantAc==="gv"||(knownAircraftIds||[]).includes(wantAc);
+  const cur=CURRENCIES.find(c=>c.code===(data.currency&&data.currency.code||data.currency))||CURRENCIES[0];
+  return{
+    aircraftId:acKnown?wantAc:"gv",
+    aircraftMissing:!acKnown,
+    currency:cur,
+    globalAlt:data.globalAlt!=null&&data.globalAlt!==""?normNum(data.globalAlt):"39000",
+    reserveFuel:data.reserveFuel!=null&&data.reserveFuel!==""?normNum(data.reserveFuel):"6000",
+    initialFob:data.initialFob!=null?normNum(data.initialFob):"",
+    calculated:!!data.calculated,
+    legs,
+  };
+}
+
+// "ABE-KIAD-LGMK-LFMN_2026-08-19.json"
+function tankerFileName(legs){
+  const codes=[];
+  if(legs[0]&&legs[0].from)codes.push(legs[0].from);
+  for(const l of legs)if(l.to)codes.push(l.to);
+  const route=codes.map(c=>String(c).toUpperCase().replace(/[^A-Z0-9]/g,"")).filter(Boolean).join("-")||"TRIP";
+  const d=new Date();
+  const pad2=n=>String(n).padStart(2,"0");
+  return`${route}_${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}.json`;
+}
+
+function downloadJson(filename,obj){
+  try{
+    const blob=new Blob([JSON.stringify(obj,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;a.download=filename;a.rel="noopener";
+    document.body.appendChild(a);a.click();
+    setTimeout(()=>{try{document.body.removeChild(a);}catch(e){}URL.revokeObjectURL(url);},0);
+    return true;
+  }catch(e){return false;}
+}
+
 function getBurn(ac,alt){
   if(ac.id==="gv"){const alts=Object.keys(GV.cruiseBurn).map(Number).sort((a,b)=>a-b);const near=alts.reduce((a,b)=>Math.abs(b-alt)<Math.abs(a-alt)?b:a);return GV.cruiseBurn[near];}
   return toNum(ac.customBurnRate||2000);
@@ -477,6 +563,22 @@ function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg){
   const depRampWaived=depRampFee>0&&depMinPurLbs>0&&fuelToLoad>=depMinPurLbs;
   const depRampOwed=depRampFee>0&&!depRampWaived;
   return{decision,tankerLbs,savings,weightWarning,note,hrs,baseBurn,tripFuel,arrRampFee,depRampFee,depRampWaived,depRampOwed,maxExtra,zfw,fob,fobCoversTrip,takeoffFuel,fuelToLoad,arrivalFob:Math.max(0,takeoffFuel-baseBurn),depP,arrP,priceDiff,breakEven,penFactor};
+}
+
+
+// Walk the leg chain, carrying arrival fuel forward into the next departure.
+// Shared by the auto-recalc effect, the Calculate button and trip import so all
+// three can never drift apart.
+function computeLegs(legsArr,fobAtStart,ac,globalAlt,reserveFuel){
+  const res=[];
+  let chainedFob=toNum(fobAtStart,0);
+  for(let i=0;i<legsArr.length;i++){
+    const leg=legsArr[i];
+    const fobForLeg=i===0?toNum(fobAtStart,0):(leg.useOverride?toNum(leg.fobOverride,0):chainedFob);
+    const r=calcLeg(ac,leg,globalAlt,reserveFuel,fobForLeg,legsArr[i+1]||null);
+    res.push(r);chainedFob=r.arrivalFob;
+  }
+  return res;
 }
 
 // ── Image import ──────────────────────────────────────────────────────────
@@ -4271,14 +4373,46 @@ export default function E6B(){
   const[pasteText,setPasteText]=useState("");
   const[briefModal,setBriefModal]=useState(null);
   const[showMath,setShowMath]=useState(false);
+  const[tripFileMsg,setTripFileMsg]=useState("");
+  const[tripFileErr,setTripFileErr]=useState(false);
   const priceMemory=useRef({});
   const imgRef=useRef();
   const pdfRef=useRef();
+  const tripFileRef=useRef();
+  const resultsRef=useRef();
+  // Auto-save must not fire until the stored draft has been read back, or the
+  // initial default state would overwrite the draft before it is restored.
+  const draftReadyRef=useRef(false);
+  const draftTimerRef=useRef(null);
 
   useEffect(()=>{(async()=>{
     const h=await recall("e6b:hist");if(h)setHistory(h);
     const p=await recall("e6b:profiles");if(p)setProfiles(p);
+    const draft=await recall(TANKER_DRAFT_KEY);
+    if(draft&&Array.isArray(draft.legs)&&draft.legs.length){
+      const st=tankerSnapshotToState(draft,(p||[]).map(x=>x.id));
+      setAircraftId(st.aircraftId);setCurrency(st.currency);
+      setGlobalAlt(st.globalAlt);setReserveFuel(st.reserveFuel);
+      setInitialFob(st.initialFob);setLegs(st.legs);
+      if(st.calculated){
+        const ac=st.aircraftId==="gv"?GV:(p||[]).find(x=>x.id===st.aircraftId)||GV;
+        setResults(computeLegs(st.legs,st.initialFob,ac,st.globalAlt,st.reserveFuel));
+        setCalculated(true);calcRef.current=true;
+      }
+    }
+    draftReadyRef.current=true;
   })();},[]);
+
+  // Debounced draft auto-save. store() already swallows localStorage failures
+  // (private mode, embedded contexts), so this can never break the app.
+  useEffect(()=>{
+    if(!draftReadyRef.current)return;
+    if(draftTimerRef.current)clearTimeout(draftTimerRef.current);
+    draftTimerRef.current=setTimeout(()=>{
+      store(TANKER_DRAFT_KEY,tankerSnapshot({aircraftId,currency,globalAlt,reserveFuel,initialFob,calculated,legs}));
+    },500);
+    return()=>{if(draftTimerRef.current)clearTimeout(draftTimerRef.current);};
+  },[aircraftId,currency,globalAlt,reserveFuel,initialFob,calculated,legs]);
 
   const currentAc=aircraftId==="gv"?GV:profiles.find(p=>p.id===aircraftId)||GV;
   const sym=currency.symbol;
@@ -4288,15 +4422,7 @@ export default function E6B(){
   const calcRef=useRef(false);
   useEffect(()=>{
     if(!calcRef.current)return;
-    const res=[];
-    let chainedFob=toNum(initialFob||0);
-    for(let i=0;i<legs.length;i++){
-      const leg=legs[i];
-      const fobForLeg=i===0?toNum(initialFob||0):(leg.useOverride?toNum(leg.fobOverride||0):chainedFob);
-      const r=calcLeg(currentAc,leg,globalAlt,reserveFuel,fobForLeg,legs[i+1]||null);
-      res.push(r);chainedFob=r.arrivalFob;
-    }
-    setResults(res);
+    setResults(computeLegs(legs,initialFob,currentAc,globalAlt,reserveFuel));
   },[initialFob,aircraftId,globalAlt,reserveFuel,currency.code]);
   function addLeg(){const lastTo=legs[legs.length-1]?.to||"";setLegs(ls=>[...ls,newLeg(lastTo)]);setCalculated(false);calcRef.current=false;}
   function removeLeg(i){setLegs(ls=>ls.filter((_,j)=>j!==i));setCalculated(false);calcRef.current=false;}
@@ -4325,18 +4451,58 @@ export default function E6B(){
   }
 
   function runCalc(){
-    const res=[];
-    let chainedFob=toNum(initialFob||0);
-    for(let i=0;i<legs.length;i++){
-      const leg=legs[i];
-      const fobForLeg=i===0?toNum(initialFob||0):(leg.useOverride?toNum(leg.fobOverride||0):chainedFob);
-      const r=calcLeg(currentAc,leg,globalAlt,reserveFuel,fobForLeg,legs[i+1]||null);
-      res.push(r);chainedFob=r.arrivalFob;
-    }
+    const res=computeLegs(legs,initialFob,currentAc,globalAlt,reserveFuel);
     setResults(res);setCalculated(true);calcRef.current=true;
     const totalSavings=res.reduce((s,r)=>s+(r?.savings||0),0);
     const entry={id:Date.now(),legs,results:res,totalSavings,aircraft:currentAc.name,currency:currency.code,globalAlt,reserveFuel,ts:new Date().toISOString()};
     const nh=[entry,...history].slice(0,30);setHistory(nh);store("e6b:hist",nh);
+  }
+
+  // ── Export / import a Tanker Calc trip as a JSON file ───────────────────
+  function flashTripMsg(msg,isErr){
+    setTripFileMsg(msg);setTripFileErr(!!isErr);
+    setTimeout(()=>setTripFileMsg(m=>m===msg?"":m),isErr?8000:4000);
+  }
+
+  function exportTrip(){
+    const payload={app:"E6B",type:TANKER_FILE_TYPE,version:TANKER_FILE_VERSION,
+      savedAt:new Date().toISOString(),
+      data:tankerSnapshot({aircraftId,currency,globalAlt,reserveFuel,initialFob,calculated,legs})};
+    // The download itself is the confirmation; only surface a message if it failed.
+    if(!downloadJson(tankerFileName(legs),payload))flashTripMsg("❌ Could not create the download",true);
+  }
+
+  async function handleTripFileImport(e){
+    const file=e.target.files&&e.target.files[0];
+    e.target.value="";
+    if(!file)return;
+    let parsed;
+    try{
+      parsed=JSON.parse(await file.text());
+    }catch(err){
+      flashTripMsg("❌ Not a valid E6B tanker trip file",true);return;
+    }
+    if(!parsed||typeof parsed!=="object"||parsed.type!==TANKER_FILE_TYPE||
+       !parsed.data||typeof parsed.data!=="object"||!Array.isArray(parsed.data.legs)){
+      flashTripMsg("❌ Not a valid E6B tanker trip file",true);return;
+    }
+    const st=tankerSnapshotToState(parsed.data,profiles.map(x=>x.id));
+    if(!st.legs.length){flashTripMsg("❌ Not a valid E6B tanker trip file",true);return;}
+    setAircraftId(st.aircraftId);setCurrency(st.currency);
+    setGlobalAlt(st.globalAlt);setReserveFuel(st.reserveFuel);
+    setInitialFob(st.initialFob);setLegs(st.legs);
+    const ac=st.aircraftId==="gv"?GV:profiles.find(x=>x.id===st.aircraftId)||GV;
+    setResults(computeLegs(st.legs,st.initialFob,ac,st.globalAlt,st.reserveFuel));
+    setCalculated(true);calcRef.current=true;
+    // Persist immediately rather than waiting out the debounce, so the imported
+    // trip survives a reload even if the user closes the tab straight away.
+    draftReadyRef.current=true;
+    store(TANKER_DRAFT_KEY,tankerSnapshot({...st,calculated:true}));
+    const warn=[];
+    if(toNum(parsed.version,1)>TANKER_FILE_VERSION)warn.push("newer file version — some fields may be missing");
+    if(st.aircraftMissing)warn.push("aircraft profile not on this device, using GV");
+    flashTripMsg("✅ Trip loaded"+(warn.length?" — "+warn.join("; "):""),false);
+    setTimeout(()=>{try{resultsRef.current?.scrollIntoView({behavior:"smooth",block:"start"});}catch(err){}},150);
   }
 
   // Load Tesseract for Calc tab OCR
@@ -4528,6 +4694,20 @@ export default function E6B(){
             </div>
           </div>
 
+          {/* Save / load this trip as a file. Tanker Calc only. */}
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:14}}>
+            <button onClick={exportTrip}
+              style={{background:"transparent",border:"1px solid "+C.border,borderRadius:8,padding:"8px 14px",color:C.muted,fontSize:12,fontWeight:600,cursor:"pointer"}}>
+              ⤓ Export Trip
+            </button>
+            <button onClick={()=>tripFileRef.current?.click()}
+              style={{background:"transparent",border:"1px solid "+C.border,borderRadius:8,padding:"8px 14px",color:C.muted,fontSize:12,fontWeight:600,cursor:"pointer"}}>
+              ⤒ Import Trip
+            </button>
+            <input ref={tripFileRef} type="file" accept=".json,application/json" onChange={handleTripFileImport} style={{display:"none"}}/>
+            {tripFileMsg&&<span style={{fontSize:12,fontWeight:600,color:tripFileErr?C.red:C.green}}>{tripFileMsg}</span>}
+          </div>
+
           {/* Trip settings */}
           <div style={{background:C.card,border:"1px solid "+C.border,borderRadius:12,padding:wide?20:16,marginBottom:14}}>
             <div style={{fontSize:11,fontWeight:700,color:C.sub,textTransform:"uppercase",letterSpacing:.8,marginBottom:12}}>Trip Settings</div>
@@ -4591,6 +4771,7 @@ export default function E6B(){
           </button>
 
           {/* Summary */}
+          <div ref={resultsRef} style={{scrollMarginTop:70}}/>
           {calculated&&results.length>0&&<>
             <div style={{background:C.card,border:"2px solid "+(totalSavings>0?C.green:C.red),borderRadius:12,padding:16,marginBottom:12}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
