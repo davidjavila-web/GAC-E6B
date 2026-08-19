@@ -4059,7 +4059,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.60";
+const APP_VERSION = "1.61";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 
@@ -4838,13 +4838,17 @@ async function forget(k) {
     localStorage.removeItem(k);
   } catch {}
 }
-function newLeg(from = "") {
+
+// Cruise altitude is per-leg: legs routinely cruise at different flight levels,
+// and each leg looks up its own burn rate from the aircraft's cruiseBurn table.
+const DEFAULT_CRUISE_ALT = "39000";
+function newLeg(from = "", cruiseAltFt = DEFAULT_CRUISE_ALT) {
   return {
     from,
     to: "",
     distNm: "",
     plannedBurnLbs: "",
-    cruiseAltFt: "",
+    cruiseAltFt,
     depPrice: "",
     arrPrice: "",
     depRampFee: "",
@@ -4861,7 +4865,10 @@ function newLeg(from = "") {
 // own state and is untouched by any of this.
 const TANKER_DRAFT_KEY = "e6b:tanker:draft";
 const TANKER_FILE_TYPE = "tanker-trip";
-const TANKER_FILE_VERSION = 1;
+// v2 moved cruise altitude from one trip-level value to a per-leg field.
+// v1 files carry data.globalAlt and blank per-leg altitudes; tankerSnapshotToState
+// migrates them by copying the global value into every leg.
+const TANKER_FILE_VERSION = 2;
 // Every field of a leg that the user can edit, with the coercion needed to pull
 // it back out of a JSON file written by another device / another app version.
 const TANKER_LEG_FIELDS = {
@@ -4898,7 +4905,6 @@ function tankerSnapshot(st) {
     currency: st.currency,
     units: "lbs",
     // fuel quantities are lbs throughout; gal/L are derived
-    globalAlt: normNum(st.globalAlt),
     reserveFuel: normNum(st.reserveFuel),
     zfw: normNum(st.zfw),
     initialFob: normNum(st.initialFob),
@@ -4912,7 +4918,14 @@ function tankerSnapshot(st) {
 // Best effort by design: unknown keys are dropped and missing ones fall back to
 // the newLeg() defaults, so a file from a newer app version still loads.
 function tankerSnapshotToState(data, knownAircraftIds) {
-  const legs = Array.isArray(data.legs) && data.legs.length ? data.legs.map(tankerLegFromRaw) : [newLeg(), newLeg()];
+  // v1 migration: one trip-level altitude becomes each leg's own. Also covers a
+  // leg that simply arrived without an altitude, from any version.
+  const legacyAlt = data.globalAlt != null && data.globalAlt !== "" ? normNum(data.globalAlt) : "";
+  const legs = Array.isArray(data.legs) && data.legs.length ? data.legs.map(raw => {
+    const l = tankerLegFromRaw(raw);
+    if (!l.cruiseAltFt) l.cruiseAltFt = legacyAlt || DEFAULT_CRUISE_ALT;
+    return l;
+  }) : [newLeg(), newLeg()];
   const wantAc = typeof data.aircraftId === "string" ? data.aircraftId : "gv";
   const acKnown = wantAc === "gv" || (knownAircraftIds || []).includes(wantAc);
   const cur = CURRENCIES.find(c => c.code === (data.currency && data.currency.code || data.currency)) || CURRENCIES[0];
@@ -4920,7 +4933,6 @@ function tankerSnapshotToState(data, knownAircraftIds) {
     aircraftId: acKnown ? wantAc : "gv",
     aircraftMissing: !acKnown,
     currency: cur,
-    globalAlt: data.globalAlt != null && data.globalAlt !== "" ? normNum(data.globalAlt) : "39000",
     reserveFuel: data.reserveFuel != null && data.reserveFuel !== "" ? normNum(data.reserveFuel) : "6000",
     zfw: data.zfw != null ? normNum(data.zfw) : "",
     initialFob: data.initialFob != null ? normNum(data.initialFob) : "",
@@ -4970,9 +4982,9 @@ function getBurn(ac, alt) {
   }
   return toNum(ac.customBurnRate || 2000);
 }
-function calcLeg(ac, leg, globalAlt, reserveFuel, fobAtDep, nextLeg, tripZfw) {
+function calcLeg(ac, leg, reserveFuel, fobAtDep, nextLeg, tripZfw) {
   const plannedBurn = toNum(leg.plannedBurnLbs, 0);
-  const alt = toNum(leg.cruiseAltFt, 0) || toNum(globalAlt, 0) || 39000;
+  const alt = toNum(leg.cruiseAltFt, 0) || toNum(DEFAULT_CRUISE_ALT, 0);
   const dist = toNum(leg.distNm, 500);
   const tas = alt > 35000 ? 470 : 420;
   const hrs = dist / tas;
@@ -5174,13 +5186,13 @@ function calcLeg(ac, leg, globalAlt, reserveFuel, fobAtDep, nextLeg, tripZfw) {
 // Walk the leg chain, carrying arrival fuel forward into the next departure.
 // Shared by the auto-recalc effect, the Calculate button and trip import so all
 // three can never drift apart.
-function computeLegs(legsArr, fobAtStart, ac, globalAlt, reserveFuel, tripZfw) {
+function computeLegs(legsArr, fobAtStart, ac, reserveFuel, tripZfw) {
   const res = [];
   let chainedFob = toNum(fobAtStart, 0);
   for (let i = 0; i < legsArr.length; i++) {
     const leg = legsArr[i];
     const fobForLeg = i === 0 ? toNum(fobAtStart, 0) : leg.useOverride ? toNum(leg.fobOverride, 0) : chainedFob;
-    const r = calcLeg(ac, leg, globalAlt, reserveFuel, fobForLeg, legsArr[i + 1] || null, tripZfw);
+    const r = calcLeg(ac, leg, reserveFuel, fobForLeg, legsArr[i + 1] || null, tripZfw);
     res.push(r);
     chainedFob = r.arrivalFob;
   }
@@ -5731,7 +5743,7 @@ function parseTripSheetPDF(text) {
 }
 
 // ── Brief builder ─────────────────────────────────────────────────────────
-function buildBrief(legs, results, totalSavings, currency, aircraft, globalAlt, reserveFuel) {
+function buildBrief(legs, results, totalSavings, currency, aircraft, reserveFuel) {
   const sym = currency.symbol,
     pos = totalSavings > 0;
   const route = legs.map((l, i) => i === 0 ? l.from + "→" + l.to : l.to).join("→");
@@ -6484,7 +6496,8 @@ function LegCard({
   const isNoFuel = r?.decision === "NO PURCHASE" || r && !isTanker && r.fobCoversTrip;
   const resultBorder = r ? isTanker ? C.green + "88" : isNoFuel ? C.red + "66" : r.decision === "NO TANKER" ? C.gold + "66" : lc + "88" : lc + "44";
 
-  // Auto-tab: open next empty field. Tab order: dist→burn→alt→depPrice→arrPrice→rampFee→payload
+  // Auto-tab: open next empty field. Tab order follows the visual order:
+  // burn→alt→dist→depPrice→arrPrice→rampFee→waived→payload
   // Skip pre-filled fields
   function nextField(fields) {
     for (const f of fields) {
@@ -6508,14 +6521,14 @@ function LegCard({
   function getFields() {
     const l = legRef.current;
     return [{
-      id: "d" + legNum,
-      val: l.distNm
-    }, {
       id: "b" + legNum,
       val: l.plannedBurnLbs
     }, {
       id: "a" + legNum,
       val: l.cruiseAltFt
+    }, {
+      id: "d" + legNum,
+      val: l.distNm
     }, {
       id: "dp" + legNum,
       val: l.depPrice
@@ -6650,19 +6663,6 @@ function LegCard({
       alignItems: "start"
     }
   }, /*#__PURE__*/React.createElement(Field, {
-    label: "Distance (nm)",
-    value: leg.distNm,
-    onChange: v => onChange({
-      ...leg,
-      distNm: v
-    }),
-    step: "10",
-    color: lc,
-    fieldId: "d" + legNum,
-    onNext: after(0),
-    legNum: legNum,
-    legContext: (leg.from || "—") + " → " + (leg.to || "—")
-  }), /*#__PURE__*/React.createElement(Field, {
     label: "Burn (lbs)",
     value: leg.plannedBurnLbs,
     onChange: v => onChange({
@@ -6672,7 +6672,7 @@ function LegCard({
     step: "100",
     color: lc,
     fieldId: "b" + legNum,
-    onNext: after(1),
+    onNext: after(0),
     legNum: legNum,
     legContext: (leg.from || "—") + " → " + (leg.to || "—")
   }), /*#__PURE__*/React.createElement(Field, {
@@ -6685,6 +6685,19 @@ function LegCard({
     step: "1000",
     color: lc,
     fieldId: "a" + legNum,
+    onNext: after(1),
+    legNum: legNum,
+    legContext: (leg.from || "—") + " → " + (leg.to || "—")
+  }), /*#__PURE__*/React.createElement(Field, {
+    label: "Distance (nm)",
+    value: leg.distNm,
+    onChange: v => onChange({
+      ...leg,
+      distNm: v
+    }),
+    step: "10",
+    color: lc,
+    fieldId: "d" + legNum,
     onNext: after(2),
     legNum: legNum,
     legContext: (leg.from || "—") + " → " + (leg.to || "—")
@@ -6748,7 +6761,7 @@ function LegCard({
     step: "0.001",
     color: lc,
     fieldId: "ap" + legNum,
-    onNext: after(6),
+    onNext: after(4),
     legNum: legNum,
     legContext: "ARR: " + (leg.to || "—")
   }), leg.arrPrice > 0 && /*#__PURE__*/React.createElement("div", {
@@ -6789,6 +6802,7 @@ function LegCard({
     step: "50",
     color: lc,
     fieldId: "drf" + legNum,
+    onNext: after(5),
     legNum: legNum,
     legContext: "DEP: " + (leg.from || "—")
   }), /*#__PURE__*/React.createElement(Field, {
@@ -6801,6 +6815,7 @@ function LegCard({
     step: "100",
     color: lc,
     fieldId: "dwv" + legNum,
+    onNext: after(6),
     legNum: legNum,
     legContext: "DEP: " + (leg.from || "—")
   })), /*#__PURE__*/React.createElement("div", {
@@ -14885,7 +14900,6 @@ function E6B() {
   const [results, setResults] = useState([]);
   const [calculated, setCalculated] = useState(false);
   const [editingAc, setEditingAc] = useState(null);
-  const [globalAlt, setGlobalAlt] = useState("39000");
   const [reserveFuel, setReserveFuel] = useState("6000");
   const [zfw, setZfw] = useState(""); // blank = fall back to aircraft BOW
   const [initialFob, setInitialFob] = useState("");
@@ -14918,14 +14932,13 @@ function E6B() {
         const st = tankerSnapshotToState(draft, (p || []).map(x => x.id));
         setAircraftId(st.aircraftId);
         setCurrency(st.currency);
-        setGlobalAlt(st.globalAlt);
         setReserveFuel(st.reserveFuel);
         setInitialFob(st.initialFob);
         setLegs(st.legs);
         setZfw(st.zfw);
         if (st.calculated) {
           const ac = st.aircraftId === "gv" ? GV : (p || []).find(x => x.id === st.aircraftId) || GV;
-          setResults(computeLegs(st.legs, st.initialFob, ac, st.globalAlt, st.reserveFuel, st.zfw));
+          setResults(computeLegs(st.legs, st.initialFob, ac, st.reserveFuel, st.zfw));
           setCalculated(true);
           calcRef.current = true;
         }
@@ -14943,7 +14956,6 @@ function E6B() {
       store(TANKER_DRAFT_KEY, tankerSnapshot({
         aircraftId,
         currency,
-        globalAlt,
         reserveFuel,
         zfw,
         initialFob,
@@ -14954,7 +14966,7 @@ function E6B() {
     return () => {
       if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
     };
-  }, [aircraftId, currency, globalAlt, reserveFuel, zfw, initialFob, calculated, legs]);
+  }, [aircraftId, currency, reserveFuel, zfw, initialFob, calculated, legs]);
   const currentAc = aircraftId === "gv" ? GV : profiles.find(p => p.id === aircraftId) || GV;
   const sym = currency.symbol;
   const acOpts = [{
@@ -14969,11 +14981,11 @@ function E6B() {
   const calcRef = useRef(false);
   useEffect(() => {
     if (!calcRef.current) return;
-    setResults(computeLegs(legs, initialFob, currentAc, globalAlt, reserveFuel, zfw));
-  }, [initialFob, aircraftId, globalAlt, reserveFuel, zfw, currency.code]);
+    setResults(computeLegs(legs, initialFob, currentAc, reserveFuel, zfw));
+  }, [initialFob, aircraftId, reserveFuel, zfw, currency.code]);
   function addLeg() {
-    const lastTo = legs[legs.length - 1]?.to || "";
-    setLegs(ls => [...ls, newLeg(lastTo)]);
+    const last = legs[legs.length - 1];
+    setLegs(ls => [...ls, newLeg(last?.to || "", last?.cruiseAltFt || DEFAULT_CRUISE_ALT)]);
     setCalculated(false);
     calcRef.current = false;
   }
@@ -15013,7 +15025,7 @@ function E6B() {
     setCalculated(false);
   }
   function runCalc() {
-    const res = computeLegs(legs, initialFob, currentAc, globalAlt, reserveFuel, zfw);
+    const res = computeLegs(legs, initialFob, currentAc, reserveFuel, zfw);
     setResults(res);
     setCalculated(true);
     calcRef.current = true;
@@ -15025,7 +15037,6 @@ function E6B() {
       totalSavings,
       aircraft: currentAc.name,
       currency: currency.code,
-      globalAlt,
       reserveFuel,
       zfw,
       ts: new Date().toISOString()
@@ -15050,7 +15061,6 @@ function E6B() {
       data: tankerSnapshot({
         aircraftId,
         currency,
-        globalAlt,
         reserveFuel,
         zfw,
         initialFob,
@@ -15083,13 +15093,12 @@ function E6B() {
     }
     setAircraftId(st.aircraftId);
     setCurrency(st.currency);
-    setGlobalAlt(st.globalAlt);
     setReserveFuel(st.reserveFuel);
     setInitialFob(st.initialFob);
     setLegs(st.legs);
     setZfw(st.zfw);
     const ac = st.aircraftId === "gv" ? GV : profiles.find(x => x.id === st.aircraftId) || GV;
-    setResults(computeLegs(st.legs, st.initialFob, ac, st.globalAlt, st.reserveFuel, st.zfw));
+    setResults(computeLegs(st.legs, st.initialFob, ac, st.reserveFuel, st.zfw));
     setCalculated(true);
     calcRef.current = true;
     // Persist immediately rather than waiting out the debounce, so the imported
@@ -15789,35 +15798,7 @@ function E6B() {
       color: C.muted,
       marginTop: 4
     }
-  }, "Enter actual FOB before first leg. Subsequent legs auto-calculated.")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 10
-    }
-  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-    style: {
-      ...LS,
-      color: C.sub
-    }
-  }, "Default Cruise Alt (ft)"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    value: globalAlt,
-    onChange: e => {
-      setGlobalAlt(e.target.value);
-    },
-    style: {
-      width: "100%",
-      background: C.bg,
-      border: "1.5px solid " + C.border,
-      borderRadius: 8,
-      padding: "10px 12px",
-      color: C.text,
-      fontSize: 16,
-      outline: "none",
-      boxSizing: "border-box"
-    }
-  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
+  }, "Enter actual FOB before first leg. Subsequent legs auto-calculated.")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
     style: {
       ...LS,
       color: C.sub
@@ -15839,7 +15820,7 @@ function E6B() {
       outline: "none",
       boxSizing: "border-box"
     }
-  }))), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 10,
       background: C.bg,
@@ -16060,7 +16041,7 @@ function E6B() {
       fontWeight: 700
     }
   }, r.savings > 0 ? "+" : r.savings < 0 ? "-" : "", fM(r.savings, sym)))))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setBriefModal(buildBrief(legs, results, totalSavings, currency, currentAc, globalAlt, reserveFuel)),
+    onClick: () => setBriefModal(buildBrief(legs, results, totalSavings, currency, currentAc, reserveFuel)),
     style: {
       width: "100%",
       background: C.panel,
@@ -16280,7 +16261,7 @@ function E6B() {
     }, pos ? "+" : "-", fM(h.totalSavings, cur.symbol)), /*#__PURE__*/React.createElement("button", {
       onClick: () => setBriefModal(buildBrief(h.legs, h.results, h.totalSavings, cur, {
         name: h.aircraft
-      }, h.globalAlt, h.reserveFuel)),
+      }, h.reserveFuel)),
       style: {
         background: "transparent",
         border: "1px solid " + C.border,
