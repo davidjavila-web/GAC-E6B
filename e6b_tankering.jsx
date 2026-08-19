@@ -1,8 +1,45 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.57";
+const APP_VERSION="1.58";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
+
+// ── Numeric parsing ───────────────────────────────────────────────────────
+// Every numeric value in this app is held in state as a *string* (Field/NumPad/
+// TextInp all emit strings, and OCR/PDF import writes strings too). Users type
+// thousands separators — "21,700" — and both Number("21,700") and
+// parseFloat("21,700") get it wrong (NaN and 21 respectively). toNum() strips
+// separators/whitespace/currency symbols first so "21700" and "21,700" always
+// compute identically, and falls back to `d` instead of ever returning NaN.
+function toNum(v,d=0){
+  if(v===null||v===undefined||v==="")return d;
+  if(typeof v==="number")return Number.isFinite(v)?v:d;
+  if(typeof v==="boolean")return v?1:0;
+  const cleaned=String(v)
+    .replace(/[\s\u00a0\u2007\u202f_']/g,"")   // spaces (incl. nbsp/narrow), underscores, apostrophe grouping
+    .replace(/[,](?=\d{3}\b)/g,"")             // 21,700 → 21700 (thousands separator only)
+    .replace(/,/g,".")                          // any remaining comma is a decimal mark: "1,5" → "1.5"
+    .replace(/[^0-9.eE+-]/g,"");                // currency symbols, "lbs", "gal", stray glyphs
+  if(cleaned===""||cleaned==="-"||cleaned==="+"||cleaned===".")return d;
+  const n=parseFloat(cleaned);
+  return Number.isFinite(n)?n:d;
+}
+
+// Canonical string form for a numeric field's state: grouping separators removed,
+// a lone comma treated as a decimal mark. State always holds this form so any
+// consumer that reads it raw sees a plain number string.
+function normNum(v){
+  const s=String(v==null?"":v).trim();
+  if(s==="")return"";
+  return s.replace(/[\s\u00a0\u2007\u202f_']/g,"").replace(/,(?=\d{3}\b)/g,"").replace(/,/g,".");
+}
+// Display form: 21700 → "21,700". Leaves anything it can't parse untouched.
+function groupNum(v){
+  const s=String(v==null?"":v);
+  const m=s.match(/^(-?)(\d*)(\.\d*)?$/);
+  if(!m)return s;
+  return m[1]+m[2].replace(/\B(?=(\d{3})+(?!\d))/g,",")+(m[3]||"");
+}
 const GV={id:"gv",name:"Gulfstream V (GV)",bow:48557,mtow:90500,mlw:75300,mzfw:54500,maxFuel:41300,burnPenaltyFactor:0.04,cruiseBurn:{35000:2200,37000:2050,39000:1900,41000:1780,43000:1680,45000:1600}};
 // ── ACN/PCN Data (GV Performance Handbook, Tire Pressure = 198 PSI, WoM = 91%) ──
 const ACN_WEIGHTS=[50000,55000,60000,65000,70000,75000,80000,85000,90000,90900];
@@ -57,7 +94,7 @@ function parsePcnString(str){
   // Parse "24/F/C/Y/T" or "260/F/D/X/T"
   const parts=str.replace(/\s+/g,"").toUpperCase().split("/");
   if(parts.length<4)return null;
-  const num=parseFloat(parts[0]);
+  const num=toNum(parts[0],NaN);
   if(isNaN(num))return null;
   const pType=parts[1]==="R"?"R":"F";
   const sub=["A","B","C","D"].includes(parts[2])?parts[2]:"B";
@@ -128,11 +165,11 @@ const ICAO_TZ={
 // null/undefined (falls back to today — best-effort while a leg is being edited).
 function jsDateFromLegDate(d){
   if(d&&typeof d==="object"&&d.month!==undefined&&d.day!=null){
-    const mi=MONTHS[d.month];const y=2000+(d.year2!=null?Number(d.year2):25);
-    if(mi!==undefined&&Number.isFinite(y))return new Date(Date.UTC(y,mi,Number(d.day),12,0,0));
+    const mi=MONTHS[d.month];const y=2000+(d.year2!=null?toNum(d.year2,NaN):25);
+    if(mi!==undefined&&Number.isFinite(y))return new Date(Date.UTC(y,mi,toNum(d.day,NaN),12,0,0));
   }else if(typeof d==="string"&&d){
     const p=d.split("-");
-    if(p.length===3){const y=Number(p[0]),mo=Number(p[1])-1,da=Number(p[2]);
+    if(p.length===3){const y=toNum(p[0],NaN),mo=toNum(p[1],NaN)-1,da=toNum(p[2],NaN);
       if(Number.isFinite(y)&&Number.isFinite(mo)&&Number.isFinite(da))return new Date(Date.UTC(y,mo,da,12,0,0));}
   }
   return new Date();
@@ -149,7 +186,7 @@ function getIcaoOffset(icao,date){
   const zone=raw||sess;
   if(zone===undefined||zone===null){
     const fixed=ICAO_TZ[icao];
-    if(fixed!==undefined&&fixed!==null&&!isNaN(fixed))return Number(fixed);
+    if(fixed!==undefined&&fixed!==null&&!isNaN(fixed))return toNum(fixed);
     return null;
   }
   if(typeof zone==="number")return zone; // manual sessionTz entry
@@ -222,10 +259,10 @@ const DUTY_LEG_TINTS=[
 ];
 const legTint=i=>{const t=DUTY_LEG_TINTS[i%DUTY_LEG_TINTS.length];return{bg:themeIsDark()?t.badge+"24":t.bg,badge:t.badge};};
 
-const fL=n=>Number(n||0).toLocaleString(undefined,{maximumFractionDigits:0})+" lbs";
-const fG=n=>(Number(n||0)/LBS_PER_GAL).toLocaleString(undefined,{maximumFractionDigits:0})+" gal";
-const fLt=n=>(Number(n||0)/LBS_PER_L).toLocaleString(undefined,{maximumFractionDigits:0})+" L";
-const fM=(n,s)=>`${s}${Math.abs(Number(n||0)).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+const fL=n=>toNum(n||0).toLocaleString(undefined,{maximumFractionDigits:0})+" lbs";
+const fG=n=>(toNum(n||0)/LBS_PER_GAL).toLocaleString(undefined,{maximumFractionDigits:0})+" gal";
+const fLt=n=>(toNum(n||0)/LBS_PER_L).toLocaleString(undefined,{maximumFractionDigits:0})+" L";
+const fM=(n,s)=>`${s}${Math.abs(toNum(n||0)).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 
 // ── Responsive hook ──────────────────────────────────────────────────────
 function useWide(bp=768){
@@ -342,34 +379,41 @@ function newLeg(from=""){return{from,to:"",distNm:"",plannedBurnLbs:"",cruiseAlt
 
 function getBurn(ac,alt){
   if(ac.id==="gv"){const alts=Object.keys(GV.cruiseBurn).map(Number).sort((a,b)=>a-b);const near=alts.reduce((a,b)=>Math.abs(b-alt)<Math.abs(a-alt)?b:a);return GV.cruiseBurn[near];}
-  return Number(ac.customBurnRate||2000);
+  return toNum(ac.customBurnRate||2000);
 }
 
 function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg){
-  const plannedBurn=Number(leg.plannedBurnLbs||0);
-  const alt=Number(leg.cruiseAltFt||globalAlt||39000);
-  const dist=Number(leg.distNm||500);
+  const plannedBurn=toNum(leg.plannedBurnLbs,0);
+  const alt=toNum(leg.cruiseAltFt,0)||toNum(globalAlt,0)||39000;
+  const dist=toNum(leg.distNm,500);
   const tas=alt>35000?470:420;
   const hrs=dist/tas;
   const calcBurn=getBurn(ac,alt)*hrs;
   const baseBurn=plannedBurn>0?plannedBurn:calcBurn;
-  const reserve=Number(reserveFuel||3000);
+  const reserve=toNum(reserveFuel,3000);
   const tripFuel=baseBurn+reserve;
-  const payload=Number(leg.payload||0);
-  const bow=Number(ac.bow||48557),zfw=bow+payload;
-  const fob=Number(fobAtDep||0);
-  const maxTOFuel=Math.min(Number(ac.maxFuel||41300),Number(ac.mtow||90500)-zfw);
-  const maxExtra=Math.max(0,maxTOFuel-fob-tripFuel);
+  const payload=toNum(leg.payload,0);
+  const bow=toNum(ac.bow,48557),zfw=bow+payload;
+  const fob=toNum(fobAtDep,0);
+  const maxTOFuel=Math.min(toNum(ac.maxFuel,41300),toNum(ac.mtow,90500)-zfw);
+  // Fuel in the tanks at takeoff *before* any tankering decision. Fuel already on
+  // board can't be offloaded, so when FOB exceeds the trip requirement the extra
+  // rides along and IS the baseline — tankering adds on top of that, not on top of
+  // (fob + tripFuel). Getting this wrong let the optimiser pick a tanker quantity
+  // that the "fuel to load" line then clamped to 0, so the decision badge and the
+  // breakdown disagreed.
+  const baseTakeoffFuel=Math.max(fob,tripFuel);
+  const maxExtra=Math.max(0,maxTOFuel-baseTakeoffFuel);
   const fobCoversTrip=fob>=tripFuel;
-  const depP=Number(leg.depPrice||0),arrP=Number(leg.arrPrice||0);
+  const depP=toNum(leg.depPrice||0),arrP=toNum(leg.arrPrice||0);
   const priceDiff=arrP-depP;
   // Arrival ramp fee comes from the NEXT leg's departure FBO
-  const arrRampFee=nextLeg?Number(nextLeg.depRampFee||0):0;
-  const arrMinPurLbs=nextLeg?Number(nextLeg.depMinPurchase||0)*LBS_PER_GAL:0;
+  const arrRampFee=nextLeg?toNum(nextLeg.depRampFee||0):0;
+  const arrMinPurLbs=nextLeg?toNum(nextLeg.depMinPurchase||0)*LBS_PER_GAL:0;
   // This leg's departure ramp fee
-  const depRampFee=Number(leg.depRampFee||0);
-  const depMinPurLbs=Number(leg.depMinPurchase||0)*LBS_PER_GAL;
-  const penFactor=Number(ac.burnPenaltyFactor||0.04);
+  const depRampFee=toNum(leg.depRampFee||0);
+  const depMinPurLbs=toNum(leg.depMinPurchase||0)*LBS_PER_GAL;
+  const penFactor=toNum(ac.burnPenaltyFactor||0.04);
   const breakEven=penFactor*hrs*depP;
   let tankerLbs=0,decision="",savings=0,weightWarning="",note="";
 
@@ -387,13 +431,13 @@ function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg){
       for(let tl=0;tl<=maxExtra;tl+=200){
         const pen=tl*penFactor*hrs;
         // Arrival ramp fee: if tankering means we buy less at destination than the waiver threshold
-        const arrivalFob=Math.max(0,fob+tl-baseBurn);
-        const fuelNeededAtDest=arrRampFee>0&&nextLeg?Math.max(0,Number(nextLeg.plannedBurnLbs||0)+Number(reserveFuel||3000)-arrivalFob):0;
+        const arrivalFob=Math.max(0,baseTakeoffFuel+tl-baseBurn);
+        const fuelNeededAtDest=arrRampFee>0&&nextLeg?Math.max(0,toNum(nextLeg.plannedBurnLbs,0)+toNum(reserveFuel,3000)-arrivalFob):0;
         const arrFeeWaived=arrRampFee>0&&arrMinPurLbs>0&&fuelNeededAtDest>=arrMinPurLbs;
         const arrFeeCost=arrRampFee>0&&!arrFeeWaived?arrRampFee:0;
         const arrFeeBaseline=(()=>{
-          const baseArrFob=Math.max(0,fob-baseBurn);
-          const baseFuelNeeded=arrRampFee>0&&nextLeg?Math.max(0,Number(nextLeg.plannedBurnLbs||0)+Number(reserveFuel||3000)-baseArrFob):0;
+          const baseArrFob=Math.max(0,baseTakeoffFuel-baseBurn);
+          const baseFuelNeeded=arrRampFee>0&&nextLeg?Math.max(0,toNum(nextLeg.plannedBurnLbs,0)+toNum(reserveFuel,3000)-baseArrFob):0;
           const baseWaived=arrRampFee>0&&arrMinPurLbs>0&&baseFuelNeeded>=arrMinPurLbs;
           return arrRampFee>0&&!baseWaived?arrRampFee:0;
         })();
@@ -419,17 +463,20 @@ function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg){
     }
   }
 
-  const takeoffWt=zfw+tripFuel+tankerLbs;
-  if(tankerLbs>0&&takeoffWt>Number(ac.mtow||90500)){
-    const ex=Math.round(takeoffWt-Number(ac.mtow||90500));
+  const mtow=toNum(ac.mtow,90500);
+  const takeoffWt=zfw+baseTakeoffFuel+tankerLbs;
+  if(tankerLbs>0&&takeoffWt>mtow){
+    const ex=Math.round(takeoffWt-mtow);
     tankerLbs=Math.max(0,tankerLbs-ex);
     weightWarning=`MTOW limit — tanker reduced by ${fL(ex)}`;
   }
-  // Calculate dep ramp fee status for display
-  const fuelBoughtAtDep=Math.max(0,tripFuel-fob)+tankerLbs;
-  const depRampWaived=depRampFee>0&&depMinPurLbs>0&&fuelBoughtAtDep>=depMinPurLbs;
+  // Single source of truth for every "load" figure the UI shows, so the decision
+  // badge ("LOAD x lbs") and the breakdown ("Fuel to load") can never disagree.
+  const takeoffFuel=baseTakeoffFuel+tankerLbs;
+  const fuelToLoad=Math.max(0,takeoffFuel-fob);
+  const depRampWaived=depRampFee>0&&depMinPurLbs>0&&fuelToLoad>=depMinPurLbs;
   const depRampOwed=depRampFee>0&&!depRampWaived;
-  return{decision,tankerLbs,savings,weightWarning,note,hrs,baseBurn,tripFuel,arrRampFee,depRampFee,depRampWaived,depRampOwed,maxExtra,zfw,fob,fobCoversTrip,arrivalFob:Math.max(0,fob+tankerLbs-baseBurn),depP,arrP,priceDiff,breakEven,penFactor};
+  return{decision,tankerLbs,savings,weightWarning,note,hrs,baseBurn,tripFuel,arrRampFee,depRampFee,depRampWaived,depRampOwed,maxExtra,zfw,fob,fobCoversTrip,takeoffFuel,fuelToLoad,arrivalFob:Math.max(0,takeoffFuel-baseBurn),depP,arrP,priceDiff,breakEven,penFactor};
 }
 
 // ── Image import ──────────────────────────────────────────────────────────
@@ -524,16 +571,16 @@ function visionResultToLegs(arr){
     const depParts=(r.depTime||"0:00").split(":");
     const arrParts=(r.arrTime||"0:00").split(":");
     const ftParts=(r.flightTime||"0:00").split(":");
-    const depH=Number(depParts[0]),depM=Number(depParts[1]||0);
-    const arrH=Number(arrParts[0]),arrM=Number(arrParts[1]||0);
-    let flightMins=Number(ftParts[0])*60+Number(ftParts[1]||0);
+    const depH=toNum(depParts[0]),depM=toNum(depParts[1]||0);
+    const arrH=toNum(arrParts[0]),arrM=toNum(arrParts[1]||0);
+    let flightMins=toNum(ftParts[0])*60+toNum(ftParts[1]||0);
     if(!flightMins){let ft=(arrH*60+arrM)-(depH*60+depM);if(ft<0)ft+=1440;flightMins=ft;}
     let date=null;
     if(r.date&&r.date.month&&r.date.day){
-      date={day:Number(r.date.day),month:String(r.date.month).toUpperCase(),year2:Number(r.date.year2||25)};
+      date={day:toNum(r.date.day),month:String(r.date.month).toUpperCase(),year2:toNum(r.date.year2||25)};
     }
     return{origin:r.origin||"????",dest:r.dest||"????",depH,depM,arrH,arrM,flightMins,
-      hasRest:!!r.hasRest,restMins:r.restTime?Number(r.restTime.split(":")[0])*60+Number((r.restTime.split(":")[1])||0):null,
+      hasRest:!!r.hasRest,restMins:r.restTime?toNum(r.restTime.split(":")[0])*60+toNum((r.restTime.split(":")[1])||0):null,
       date};
   });
   return{legs,needDate:!legs[0].date};
@@ -561,32 +608,32 @@ function parseOcrTripText(text){
         if(parts.length>=5){
           // parts: [ETE, BURN, CRUISE, FL, DIST]
           const eteRaw=parts[0];
-          const burn=Number(parts[1]);
+          const burn=toNum(parts[1]);
           const fl=parts[3];
-          const dist=Number(parts[4]);
+          const dist=toNum(parts[4]);
           // Parse ETE: could be "7+42", "742", "0+55", "2427"
           let eteMin=0;
           if(eteRaw.includes("+")){
             const ep=eteRaw.split("+");
-            eteMin=Number(ep[0])*60+Number(ep[1]);
+            eteMin=toNum(ep[0])*60+toNum(ep[1]);
           }else{
             // No +, try to split: last 2 digits = minutes, rest = hours
             const eteNum=eteRaw.replace(/[^0-9]/g,"");
             if(eteNum.length>=3){
-              const mins=Number(eteNum.slice(-2));
-              const hrs=Number(eteNum.slice(0,-2));
+              const mins=toNum(eteNum.slice(-2));
+              const hrs=toNum(eteNum.slice(0,-2));
               if(hrs<24&&mins<60)eteMin=hrs*60+mins;
             }else if(eteNum.length===2){
-              eteMin=Number(eteNum); // assume minutes
+              eteMin=toNum(eteNum); // assume minutes
             }else{
-              eteMin=Number(eteNum)*60; // assume hours
+              eteMin=toNum(eteNum)*60; // assume hours
             }
           }
           leg.ete=eteMin>0?Math.floor(eteMin/60)+"+"+String(eteMin%60).padStart(2,"0"):null;
           if(burn>0)leg.plannedBurnLbs=burn;
           if(dist>0)leg.distNm=dist;
           // Parse FL: could be "450", "430", "50" (OCR dropped a digit)
-          let flNum=Number(fl);
+          let flNum=toNum(fl);
           if(flNum>0){
             if(flNum<100)flNum=flNum*10; // "50" → 500 → probably 450, but best guess is *10
             // FL is in hundreds of feet, convert to feet
@@ -594,8 +641,8 @@ function parseOcrTripText(text){
           }
         }else if(parts.length>=2){
           // Partial parse — try to get at least BURN
-          for(const p of parts){const n=Number(p);if(n>1000&&n<50000&&!leg.plannedBurnLbs)leg.plannedBurnLbs=n;}
-          for(const p of parts){const n=Number(p);if(n>100&&n<5000&&!leg.distNm)leg.distNm=n;}
+          for(const p of parts){const n=toNum(p);if(n>1000&&n<50000&&!leg.plannedBurnLbs)leg.plannedBurnLbs=n;}
+          for(const p of parts){const n=toNum(p);if(n>100&&n<5000&&!leg.distNm)leg.distNm=n;}
         }
         break;
       }
@@ -619,14 +666,14 @@ function parseTripText(text){
       for(let j=i+1;j<Math.min(i+9,lines.length);j++){
         if(lines[j].match(routeRe))break;
         if(lines[j]==="ETE"&&/^\d+\+\d+$/.test(lines[j+1]||"")){leg.ete=lines[j+1];j++;}
-        if(lines[j]==="BURN"&&/^\d+$/.test(lines[j+1]||"")){leg.plannedBurnLbs=Number(lines[j+1]);j++;}
+        if(lines[j]==="BURN"&&/^\d+$/.test(lines[j+1]||"")){leg.plannedBurnLbs=toNum(lines[j+1]);j++;}
       }
       legs.push(leg);
     }
   }
   if(legs.length===0)return[];
   const allBurns=[];
-  for(let i=0;i<lines.length;i++){if(lines[i]==="BURN"&&/^\d+$/.test(lines[i+1]||""))allBurns.push(Number(lines[i+1]));}
+  for(let i=0;i<lines.length;i++){if(lines[i]==="BURN"&&/^\d+$/.test(lines[i+1]||""))allBurns.push(toNum(lines[i+1]));}
   const usedBurns=new Set(legs.map(l=>l.plannedBurnLbs).filter(Boolean));
   const unusedBurns=allBurns.filter(b=>!usedBurns.has(b));
   let ubIdx=0;
@@ -635,8 +682,8 @@ function parseTripText(text){
   for(let i=0;i<lines.length;i++){
     if(lines[i]==="FL"){
       const n1=lines[i+1]||"",n2=lines[i+2]||"",n3=lines[i+3]||"";
-      if(n1==="DIST"&&/^\d+$/.test(n2)&&/^\d+$/.test(n3)){flDist.push({fl:Number(n2)*100,dist:Number(n3)});i+=3;}
-      else if(/^\d+$/.test(n1)&&n2==="DIST"&&/^\d+$/.test(n3)){flDist.push({fl:Number(n1)*100,dist:Number(n3)});i+=3;}
+      if(n1==="DIST"&&/^\d+$/.test(n2)&&/^\d+$/.test(n3)){flDist.push({fl:toNum(n2)*100,dist:toNum(n3)});i+=3;}
+      else if(/^\d+$/.test(n1)&&n2==="DIST"&&/^\d+$/.test(n3)){flDist.push({fl:toNum(n1)*100,dist:toNum(n3)});i+=3;}
     }
   }
   flDist.forEach((b,idx)=>{if(legs[idx]){legs[idx].cruiseAltFt=b.fl;legs[idx].distNm=b.dist;}});
@@ -714,9 +761,9 @@ function parseTripSheetPDF(text){
     const rf=block.match(/Ramp Fee:\s*\$?\s*([\d,]+(?:\.\d+)?)/i);
     const wv=block.match(/Waived:\s*([\d,]+)\s*Gallon/i);
     fuelNotes[icao]={
-      pricePerGal:pr?Number(pr[1]):null,
-      rampFee:rf?Number(rf[1].replace(/,/g,"")):null,
-      waivedGal:wv?Number(wv[1].replace(/,/g,"")):null,
+      pricePerGal:pr?toNum(pr[1]):null,
+      rampFee:rf?toNum(rf[1].replace(/,/g,"")):null,
+      waivedGal:wv?toNum(wv[1].replace(/,/g,"")):null,
     };
   });
 
@@ -736,8 +783,8 @@ function parseTripSheetPDF(text){
     const dm=block.match(/Distance:\s*([\d,]+)\s*nm/i);
     const bm=block.match(/Fuel\s*Burn:\s*([\d,]+)\s*lbs/i);
     return{from,to,
-      distNm:dm?Number(dm[1].replace(/,/g,"")):null,
-      plannedBurnLbs:bm?Number(bm[1].replace(/,/g,"")):null};
+      distNm:dm?toNum(dm[1].replace(/,/g,"")):null,
+      plannedBurnLbs:bm?toNum(bm[1].replace(/,/g,"")):null};
   });
   // Fallback: derive routing from the Summary order if leg blocks gave no ICAOs.
   if((legs.length===0||legs.every(l=>!l.from))&&summaryList.length>=2){
@@ -769,7 +816,7 @@ function buildBrief(legs,results,totalSavings,currency,aircraft,globalAlt,reserv
 
 // ── NumPad ────────────────────────────────────────────────────────────────
 function NumPad({value,onChange,onClose,onNext,label,step,legNum,legContext,legColor}){
-  const[val,setVal]=useState(String(value||""));
+  const[val,setVal]=useState(normNum(value));
   const isDecimal=String(step||"any").includes(".");
   const lc=legColor||C.accent;
   function press(k){
@@ -793,7 +840,7 @@ function NumPad({value,onChange,onClose,onNext,label,step,legNum,legContext,legC
         <button onClick={onClose} style={{background:"transparent",border:"none",color:"#6a8fa8",fontSize:22,cursor:"pointer",padding:"4px 10px",lineHeight:1,flexShrink:0}}>✕</button>
       </div>
       <div style={{background:"#0f1829",borderRadius:10,padding:"14px 18px",marginBottom:12,textAlign:"right",border:"1.5px solid "+C.accent}}>
-        <span style={{fontSize:34,fontWeight:800,color:"#dce6ee",letterSpacing:1}}>{val||"0"}</span>
+        <span style={{fontSize:34,fontWeight:800,color:"#dce6ee",letterSpacing:1}}>{groupNum(val)||"0"}</span>
       </div>
       {rows.map((row,ri)=>(
         <div key={ri} style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
@@ -843,10 +890,17 @@ function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext
   // Local buffer for keyboard typing — only synced to the parent on blur/Enter.
   // Without this, every keystroke updates parent state, the leg re-renders, and
   // the input loses focus after a single digit.
-  const[local,setLocal]=useState(value);
+  // Displayed grouped ("21,700") while idle, raw ("21700") while being edited.
+  // Only the normalised form is ever pushed to the parent.
+  const[local,setLocal]=useState(()=>groupNum(value));
   const focusedRef=useRef(false);
-  useEffect(()=>{if(!focusedRef.current)setLocal(value);},[value]);
-  const commit=()=>{focusedRef.current=false;if(local!==value)onChange(local);};
+  useEffect(()=>{if(!focusedRef.current)setLocal(groupNum(value));},[value]);
+  const commit=()=>{
+    focusedRef.current=false;
+    const clean=normNum(local);
+    setLocal(groupNum(clean));
+    if(clean!==value)onChange(clean);
+  };
   useEffect(()=>{
     if(!fieldId)return;
     window.__e6b=window.__e6b||{};
@@ -860,12 +914,12 @@ function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext
         {hasKb
           ?<input type="text" inputMode="decimal" value={local}
              onChange={e=>setLocal(e.target.value)}
-             onFocus={e=>{focusedRef.current=true;e.target.select();}}
+             onFocus={e=>{focusedRef.current=true;e.target.select();setLocal(normNum(local));}}
              onBlur={commit}
              onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();commit();e.target.blur();if(onNext)onNext();}}}
              style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
                padding:"10px 40px 10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
-          :<input readOnly value={value} onClick={()=>setShowPad(true)}
+          :<input readOnly value={groupNum(value)} onClick={()=>setShowPad(true)}
              style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
                padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box",cursor:"pointer"}}/>}
         {hasKb&&<button type="button" onMouseDown={e=>e.preventDefault()} onClick={()=>setShowPad(true)}
@@ -875,7 +929,7 @@ function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext
             fontSize:14,lineHeight:1,cursor:"pointer",color:lc}}>🔢</button>}
         {showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
           <NumPad value={value} label={label} step={step||"any"}
-            onChange={v=>{setLocal(v);onChange(v);setShowPad(false);}}
+            onChange={v=>{const c=normNum(v);setLocal(groupNum(c));onChange(c);setShowPad(false);}}
             onClose={()=>setShowPad(false)}
             onNext={onNext}
             legNum={legNum} legContext={legContext} legColor={lc}/>
@@ -908,7 +962,9 @@ function DecisionBadge({r,sym,from,to}){
   const[showExp,setShowExp]=React.useState(false);
 
   let action="";
-  if(isTanker)action="LOAD "+fL(r.tankerLbs)+" ("+fG(r.tankerLbs)+") at "+(from||"departure");
+  const uplift=r.fuelToLoad!=null?r.fuelToLoad:Math.max(0,(r.tripFuel||0)+(r.tankerLbs||0)-(r.fob||0));
+  if(isTanker)action="LOAD "+fL(uplift)+" ("+fG(uplift)+") at "+(from||"departure")
+    +(uplift>r.tankerLbs?" — incl. "+fL(r.tankerLbs)+" tankered":"");
   else if(isNoPurchase)action="NO FUEL at "+(from||"departure")+" — current FOB covers this leg";
   else if(r.fobCoversTrip)action="NO FUEL at "+(from||"departure")+" — depart with current FOB";
   else if(r.arrRampFee>0)action="TRIP FUEL ONLY at "+(from||"departure")+" — cheaper to refuel at "+(to||"destination");
@@ -916,11 +972,11 @@ function DecisionBadge({r,sym,from,to}){
 
   // Build plain-English explanation
   function buildExplanation(){
-    const depP=Number(r.depP||0),arrP=Number(r.arrP||0);
-    const diff=Number(r.priceDiff||0);
-    const be=Number(r.breakEven||0);
-    const hrs=Number(r.hrs||0);
-    const pen=Number(r.penFactor||0.04);
+    const depP=toNum(r.depP||0),arrP=toNum(r.arrP||0);
+    const diff=toNum(r.priceDiff||0);
+    const be=toNum(r.breakEven||0);
+    const hrs=toNum(r.hrs||0);
+    const pen=toNum(r.penFactor||0.04);
     const lines=[];
 
     if(r.decision==="MUST TANKER"){
@@ -999,8 +1055,8 @@ function DecisionBadge({r,sym,from,to}){
 
       {/* Tanker breakdown */}
       {isTanker&&r.tankerLbs>0&&(()=>{
-        const takeoffFuel=r.tripFuel+r.tankerLbs;
-        const fuelToLoad=Math.max(0,takeoffFuel-r.fob);
+        const takeoffFuel=r.takeoffFuel!=null?r.takeoffFuel:r.tripFuel+r.tankerLbs;
+        const fuelToLoad=r.fuelToLoad!=null?r.fuelToLoad:Math.max(0,takeoffFuel-r.fob);
         return<>
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:6,marginBottom:6}}>
           {[{l:"Takeoff Fuel",v:fL(takeoffFuel),h:false},{l:"Current FOB",v:"−"+fL(r.fob),h:false},{l:"Fuel to Load",v:fL(fuelToLoad),h:true}].map(({l,v,h})=>(
@@ -1021,7 +1077,7 @@ function DecisionBadge({r,sym,from,to}){
       {/* Departure ramp fee status */}
       {r.depRampFee>0&&<div style={{background:(r.depRampWaived?C.green:C.gold)+"15",border:"1px solid "+(r.depRampWaived?C.green:C.gold)+"33",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4,marginBottom:10}}>
         <span style={{fontSize:12,color:C.sub}}>Dep ramp fee at {from}{r.depRampWaived?" (waived)":""}</span>
-        <span style={{fontSize:15,fontWeight:800,color:r.depRampWaived?C.green:C.gold}}>{r.depRampWaived?"WAIVED":sym+Number(r.depRampFee||0).toFixed(0)}</span>
+        <span style={{fontSize:15,fontWeight:800,color:r.depRampWaived?C.green:C.gold}}>{r.depRampWaived?"WAIVED":sym+toNum(r.depRampFee||0).toFixed(0)}</span>
       </div>}
 
       {/* Explanation toggle */}
@@ -1113,7 +1169,7 @@ function LegCard({leg,legNum,total,currency,result:r,onChange,onRemove,legColor,
           <span style={{color:lc,fontSize:18,fontWeight:700}}>→</span>
           <input value={leg.to} onChange={e=>onChange({...leg,to:e.target.value.toUpperCase().slice(0,4)})} maxLength={4}
             style={{background:"transparent",border:"none",borderBottom:"2px solid "+lc,color:C.text,fontSize:16,fontWeight:800,width:58,outline:"none",textTransform:"uppercase",letterSpacing:2,padding:"2px 0",textAlign:"center"}}/>
-          {(leg.distNm||leg.plannedBurnLbs)&&<span style={{fontSize:11,color:lc+"cc"}}>{leg.distNm&&leg.distNm+"nm"}{leg.plannedBurnLbs&&" · "+Number(leg.plannedBurnLbs).toLocaleString()+" lbs"}</span>}
+          {(leg.distNm||leg.plannedBurnLbs)&&<span style={{fontSize:11,color:lc+"cc"}}>{leg.distNm&&leg.distNm+"nm"}{leg.plannedBurnLbs&&" · "+toNum(leg.plannedBurnLbs).toLocaleString()+" lbs"}</span>}
         </div>
         {total>1&&<button onClick={onRemove} style={{background:C.red+"22",border:"1px solid "+C.red+"44",color:C.red,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:12}}>✕</button>}
       </div>
@@ -1244,7 +1300,7 @@ function BriefModal({brief,onClose}){
       lines.push("─────────────────────");
       lines.push("LEG "+(i+1)+": "+leg.from+" → "+leg.to);
       if(leg.distNm)lines.push("Distance: "+leg.distNm+"nm");
-      if(leg.plannedBurnLbs)lines.push("Planned burn: "+Number(leg.plannedBurnLbs).toLocaleString()+" lbs");
+      if(leg.plannedBurnLbs)lines.push("Planned burn: "+toNum(leg.plannedBurnLbs).toLocaleString()+" lbs");
       lines.push("");
       lines.push("DECISION: "+action);
       lines.push("");
@@ -1275,16 +1331,18 @@ function BriefModal({brief,onClose}){
   }
 
   function legExplanation(leg,r,i){
-    const depP=Number(r.depP||0),arrP=Number(r.arrP||0);
-    const diff=Number(r.priceDiff||0);
-    const be=Number(r.breakEven||0);
-    const hrs=Number(r.hrs||0);
-    const pen=Number(r.penFactor||0.04);
+    const depP=toNum(r.depP||0),arrP=toNum(r.arrP||0);
+    const diff=toNum(r.priceDiff||0);
+    const be=toNum(r.breakEven||0);
+    const hrs=toNum(r.hrs||0);
+    const pen=toNum(r.penFactor||0.04);
     const isTanker=r.decision==="TANKER"||r.decision==="MUST TANKER";
     const lc=LEG_COLORS[i%LEG_COLORS.length];
 
     let action="";
-    if(isTanker) action="LOAD "+fL(r.tankerLbs)+" ("+fG(r.tankerLbs)+") at "+leg.from;
+    const uplift=r.fuelToLoad!=null?r.fuelToLoad:Math.max(0,(r.tripFuel||0)+(r.tankerLbs||0)-(r.fob||0));
+    if(isTanker) action="LOAD "+fL(uplift)+" ("+fG(uplift)+") at "+leg.from
+      +(uplift>r.tankerLbs?" — incl. "+fL(r.tankerLbs)+" tankered":"");
     else if(r.decision==="NO PURCHASE") action="NO FUEL at "+leg.from+" — current FOB covers this leg";
     else if(r.fobCoversTrip) action="NO FUEL at "+leg.from+" — depart with current FOB";
     else if(r.arrRampFee>0) action="TRIP FUEL ONLY at "+leg.from+" — cheaper to refuel at "+leg.to;
@@ -1307,15 +1365,15 @@ function BriefModal({brief,onClose}){
     if(hrs>0&&pen>0&&depP>0) mathRows.push({l:"Burn penalty factor",v:(pen*100).toFixed(1)+"% per hr  =  "+sym+(pen*depP).toFixed(3)+"/lb/hr"});
     if(be>0) mathRows.push({l:"Break-even price diff needed",v:sym+be.toFixed(3)+"/lb over "+hrs.toFixed(2)+" hrs"});
     if(r.tankerLbs>0){
-      const takeoffFuel=r.tripFuel+r.tankerLbs;
-      const fuelToLoad=Math.max(0,takeoffFuel-r.fob);
+      const takeoffFuel=r.takeoffFuel!=null?r.takeoffFuel:r.tripFuel+r.tankerLbs;
+      const fuelToLoad=r.fuelToLoad!=null?r.fuelToLoad:Math.max(0,takeoffFuel-r.fob);
       mathRows.push({l:"Takeoff fuel (trip + extra)",v:fL(takeoffFuel)});
       mathRows.push({l:"Fuel to load",v:fL(fuelToLoad)+"  ("+fG(fuelToLoad)+")  ("+fLt(fuelToLoad)+")",highlight:true,color:C.green});
       mathRows.push({l:"Of which extra tankering",v:fL(r.tankerLbs)+"  ("+fG(r.tankerLbs)+")"});
       if(depP>0) mathRows.push({l:"Cost to purchase extra fuel",v:sym+(r.tankerLbs*depP).toFixed(2)+" at "+leg.from});
       if(arrP>0) mathRows.push({l:"Cost if bought at destination",v:sym+(r.tankerLbs*arrP).toFixed(2)+" at "+leg.to});
     }
-    if(r.depRampFee>0) mathRows.push({l:"Dep ramp fee at "+leg.from,v:sym+Number(r.depRampFee).toFixed(0)+(r.depRampWaived?" (waived by fuel purchase)":" (payable)")});
+    if(r.depRampFee>0) mathRows.push({l:"Dep ramp fee at "+leg.from,v:sym+toNum(r.depRampFee).toFixed(0)+(r.depRampWaived?" (waived by fuel purchase)":" (payable)")});
     if(r.savings!==0) mathRows.push({l:"Net savings / cost",v:(r.savings>0?"+":"")+sym+r.savings.toFixed(2),highlight:true,color:r.savings>0?C.green:C.red});
     if(r.arrivalFob>0) mathRows.push({l:"Arrival FOB",v:fL(r.arrivalFob)+" → carried to next leg"});
 
@@ -1324,13 +1382,13 @@ function BriefModal({brief,onClose}){
     if(r.decision==="MUST TANKER"){
       narrative.push("No fuel available at "+leg.to+". You must carry all fuel needed for this leg from "+leg.from+".");
     } else if(r.decision==="NO PURCHASE"){
-      narrative.push("Current fuel on board ("+fL(r.fob)+") fully covers the trip fuel requirement of "+fL(r.tripFuel)+" including the "+fL(Number(reserveFuel))+" reserve. No purchase is needed or beneficial at this stop.");
+      narrative.push("Current fuel on board ("+fL(r.fob)+") fully covers the trip fuel requirement of "+fL(r.tripFuel)+" including the "+fL(toNum(reserveFuel))+" reserve. No purchase is needed or beneficial at this stop.");
     } else if(isTanker){
       if(diff>0){
         narrative.push("Fuel is "+sym+diff.toFixed(3)+"/lb cheaper at "+leg.from+" than "+leg.to+". After accounting for the burn penalty of "+sym+(pen*depP).toFixed(3)+"/lb per hour over "+hrs.toFixed(2)+" hours (break-even: "+sym+be.toFixed(3)+"/lb), the price advantage of "+sym+diff.toFixed(3)+"/lb still exceeds the cost of carrying the fuel.");
       }
       if(r.depRampFee>0&&r.depRampWaived){
-        narrative.push("The "+sym+Number(r.depRampFee).toFixed(0)+" departure ramp fee at "+leg.from+" is waived by the fuel purchase.");
+        narrative.push("The "+sym+toNum(r.depRampFee).toFixed(0)+" departure ramp fee at "+leg.from+" is waived by the fuel purchase.");
       }
       narrative.push("Net result: loading "+fL(r.tankerLbs)+" at "+leg.from+" saves "+sym+r.savings.toFixed(2)+" compared to buying at "+leg.to+".");
     } else {
@@ -1343,7 +1401,7 @@ function BriefModal({brief,onClose}){
         narrative.push("Although fuel is "+sym+diff.toFixed(3)+"/lb cheaper at "+leg.from+", the burn penalty of "+sym+(pen*depP).toFixed(3)+"/lb per hour over "+hrs.toFixed(2)+" hours requires a price difference of at least "+sym+be.toFixed(3)+"/lb to break even. Carrying extra fuel would cost more than it saves.");
       }
       if(r.depRampFee>0&&r.depRampOwed){
-        narrative.push("A departure ramp fee of "+sym+Number(r.depRampFee).toFixed(0)+" applies at "+leg.from+".");
+        narrative.push("A departure ramp fee of "+sym+toNum(r.depRampFee).toFixed(0)+" applies at "+leg.from+".");
       }
       if(r.fobCoversTrip){
         narrative.push("Depart "+leg.from+" with current fuel. No purchase needed.");
@@ -1410,7 +1468,7 @@ function BriefModal({brief,onClose}){
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
                 <div style={{background:lc,borderRadius:7,padding:"3px 12px",fontSize:11,fontWeight:800,color:"#fff"}}>LEG {i+1}</div>
                 <div style={{fontSize:15,fontWeight:800,color:C.text,letterSpacing:.5}}>{leg.from} → {leg.to}</div>
-                <div style={{fontSize:11,color:C.muted}}>{leg.distNm&&leg.distNm+"nm"}{leg.plannedBurnLbs&&" · "+Number(leg.plannedBurnLbs).toLocaleString()+" lbs burn"}</div>
+                <div style={{fontSize:11,color:C.muted}}>{leg.distNm&&leg.distNm+"nm"}{leg.plannedBurnLbs&&" · "+toNum(leg.plannedBurnLbs).toLocaleString()+" lbs burn"}</div>
               </div>
 
               {/* Verdict banner */}
@@ -1501,7 +1559,7 @@ function PavementCalc(){
   const[showExplain,setShowExplain]=useState(false);
   const[result,setResult]=useState(null);
 
-  const isPCR=Number(gNum||0)>100||(pasteParsed&&pasteParsed.pcn>100);
+  const isPCR=toNum(gNum||0)>100||(pasteParsed&&pasteParsed.pcn>100);
 
   // ── Guided helpers ──
   function gPressNum(k){
@@ -1549,7 +1607,7 @@ function PavementCalc(){
   // ── Calculate ──
   function doCalc(pcnNum,pType,sub,tire){
     setShowExplain(false);
-    const w=Number(weight||90500);
+    const w=toNum(weight||90500);
     const md=pcnNum>100?"acr":"acn";
     const acVal=md==="acr"?getAcr(w,pType,sub):getAcn(w,pType,sub);
     const tireLimit=TIRE_LIMITS[tire]||9999;
@@ -1560,7 +1618,7 @@ function PavementCalc(){
       acVal:Math.round(acVal*10)/10,pcnNum,tireLimit,tireCat:tire,
       weight:w,pavType:pType,subgrade:sub,mode:md});
   }
-  function calcGuided(){doCalc(Number(gNum),gPav,gSub,gTire);}
+  function calcGuided(){doCalc(toNum(gNum),gPav,gSub,gTire);}
   function calcPaste(){if(pasteParsed)doCalc(pasteParsed.pcn,pasteParsed.pavementType,pasteParsed.subgrade,pasteParsed.tireCat);}
 
   const gParts=gBuildParts();
@@ -1687,7 +1745,7 @@ function PavementCalc(){
       {gStep===0&&!gDone&&<div style={{display:"flex",flexDirection:"column",gap:7}}>
         <div style={{fontSize:12,color:C.muted,textAlign:"center",marginBottom:2,lineHeight:1.5}}>
           Enter the value from Jeppesen charts
-          {gNum&&Number(gNum)>100&&<span style={{color:C.gold,fontWeight:700}}> · PCR mode</span>}
+          {gNum&&toNum(gNum)>100&&<span style={{color:C.gold,fontWeight:700}}> · PCR mode</span>}
         </div>
         {numRows.map((row,ri)=>(
           <div key={ri} style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7}}>
@@ -1787,7 +1845,7 @@ function PavementCalc(){
         <div style={{background:C.card,border:"1px solid "+C.border,borderRadius:10,overflow:"hidden",marginBottom:12}}>
           <div style={{padding:"8px 12px",background:C.panel,fontSize:10,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:.8}}>Assessment Detail</div>
           {[
-            {l:"Gross Weight",v:Number(result.weight).toLocaleString()+" lbs"},
+            {l:"Gross Weight",v:toNum(result.weight).toLocaleString()+" lbs"},
             {l:"Pavement Type",v:result.pavType==="F"?"Flexible":"Rigid"},
             {l:"Subgrade",v:SUBGRADE_LABELS[result.subgrade]+" ("+result.subgrade+") — "+(result.mode==="acr"?SUBGRADE_E[result.subgrade]:result.pavType==="F"?SUBGRADE_CBR[result.subgrade]:SUBGRADE_K[result.subgrade])},
             {l:result.acnLabel+" (Aircraft)",v:String(result.acVal),highlight:true,color:result.strengthPasses?C.green:C.red},
@@ -1845,7 +1903,7 @@ function PavementCalc(){
           const subName=SUBGRADE_LABELS[result.subgrade]||"Medium";
 
           lines.push({type:"context",icon:"📍",
-            text:`You're evaluating a ${Number(result.weight).toLocaleString()} lb aircraft against runway pavement rated ${result.pcnNum}/${result.pavType}/${result.subgrade}/${result.tireCat}.`});
+            text:`You're evaluating a ${toNum(result.weight).toLocaleString()} lb aircraft against runway pavement rated ${result.pcnNum}/${result.pavType}/${result.subgrade}/${result.tireCat}.`});
 
           if(isACR)lines.push({type:"info",icon:"ℹ️",
             text:"This runway uses the newer ACR/PCR rating system, which measures pavement strength using the elastic modulus of the subgrade for improved accuracy over the legacy ACN/PCN system."});
@@ -1854,7 +1912,7 @@ function PavementCalc(){
             text:`The runway has ${pavName} pavement with ${subName.toLowerCase()} subgrade strength (category ${result.subgrade}).`});
 
           lines.push({type:"calc",icon:"🔢",
-            text:`At ${Number(result.weight).toLocaleString()} lbs on ${pavName} pavement with ${subName.toLowerCase()} subgrade, the GV's ${acL} is ${result.acVal}.`});
+            text:`At ${toNum(result.weight).toLocaleString()} lbs on ${pavName} pavement with ${subName.toLowerCase()} subgrade, the GV's ${acL} is ${result.acVal}.`});
 
           if(result.strengthPasses){
             lines.push({type:"pass",icon:"✅",
@@ -1878,7 +1936,7 @@ function PavementCalc(){
 
           if(result.suitable){
             lines.push({type:"verdict-pass",icon:"🟢",
-              text:`Both the pavement strength and tire pressure checks pass. This runway is suitable for unrestricted operations at ${Number(result.weight).toLocaleString()} lbs.`});
+              text:`Both the pavement strength and tire pressure checks pass. This runway is suitable for unrestricted operations at ${toNum(result.weight).toLocaleString()} lbs.`});
           }else{
             const reasons=[];
             if(!result.strengthPasses)reasons.push("pavement strength is insufficient");
@@ -2096,36 +2154,36 @@ function BrakeCalc(){
     const s=str.replace(/\s+/g,"").toUpperCase();
     // Formats: "280/5", "280/5G17", "280/5 G17", "280/5G 17"
     const m=s.match(/^(\d{1,3})[\/\\](\d+)(?:G(\d+))?$/);
-    if(m){setWindParsed({dir:Number(m[1]),spd:Number(m[2]),gust:m[3]?Number(m[3]):null});return;}
+    if(m){setWindParsed({dir:toNum(m[1]),spd:toNum(m[2]),gust:m[3]?toNum(m[3]):null});return;}
     setWindParsed(null);
   }
   function getWindComponent(){
     if(!windParsed||!rwyHdg)return 0;
     const spd=windParsed.gust||windParsed.spd; // use gust for worst case
-    const diff=(windParsed.dir-Number(rwyHdg))*Math.PI/180;
+    const diff=(windParsed.dir-toNum(rwyHdg))*Math.PI/180;
     return-spd*Math.cos(diff); // negative=headwind, positive=tailwind
   }
   function getXwind(){
     if(!windParsed||!rwyHdg)return 0;
     const spd=windParsed.gust||windParsed.spd;
-    return Math.abs(spd*Math.sin((windParsed.dir-Number(rwyHdg))*Math.PI/180));
+    return Math.abs(spd*Math.sin((windParsed.dir-toNum(rwyHdg))*Math.PI/180));
   }
 
   function calculate(){
     setShowExplain(false);
-    const w=Number(weight||75000);
-    const alt=Number(altFt||0);
-    const oat=Number(oatC||15);
+    const w=toNum(weight||75000);
+    const alt=toNum(altFt||0);
+    const oat=toNum(oatC||15);
     const wind=getWindComponent();
-    const taxi=Number(taxiDist||0);
-    const slope=Number(slopePct||0);
-    const slopeM=Number(slopeMiles||0);
+    const taxi=toNum(taxiDist||0);
+    const slope=toNum(slopePct||0);
+    const slopeM=toNum(slopeMiles||0);
 
     let landBke;
     if(useBtms&&btmsTemp){
-      landBke=Number(btmsTemp)/BTMS_PER_MFP;
+      landBke=toNum(btmsTemp)/BTMS_PER_MFP;
     }else{
-      const cas=Number(brakesOnSpd||120);
+      const cas=toNum(brakesOnSpd||120);
       const gs=casToGs(cas,alt,oat,wind);
       landBke=calcBke(w,gs);
     }
@@ -2137,11 +2195,11 @@ function BrakeCalc(){
       coolingFull:bkeCoolingTime(totalLanding),zone:bkeZone(totalLanding),mode};
 
     if(mode==="turnaround"){
-      const tw=Number(toWeight||89000);
-      const v1=Number(toV1||143)+2; // brakes-on = V1+2
-      const tTaxi=Number(toTaxiDist||2);
-      const tSlope=Number(toSlopePct||0);
-      const tSlopeM=Number(toSlopeMiles||0);
+      const tw=toNum(toWeight||89000);
+      const v1=toNum(toV1||143)+2; // brakes-on = V1+2
+      const tTaxi=toNum(toTaxiDist||2);
+      const tSlope=toNum(toSlopePct||0);
+      const tSlopeM=toNum(toSlopeMiles||0);
       const toGs=casToGs(v1,alt,oat,wind);
       const toBke=calcBke(tw,toGs);
       const toTaxiBke=tTaxi*BKE_TAXI_PER_MILE+(tSlope>0?tSlope*BKE_SLOPE_PER_PCT_MILE*tSlopeM:0);
@@ -2383,13 +2441,13 @@ function BrakeCalc(){
           else{
             const wc=getWindComponent();const wcAbs=Math.abs(Math.round(wc));const wcType=wc<0?"headwind":"tailwind";
             const windNote=windParsed&&wcAbs>0?` With ${wcAbs} kt ${wcType} (${windParsed.dir}°/${windParsed.gust||windParsed.spd} kt${windParsed.gust?" gust":""}, runway ${rwyHdg}°), ground speed is adjusted accordingly.`:"";
-            lines.push({icon:"🔢",text:`At ${Number(weight).toLocaleString()} lbs with brakes-on speed of ${brakesOnSpd} KCAS, the braking kinetic energy is ${result.landBke} MFP.${windNote}`});
+            lines.push({icon:"🔢",text:`At ${toNum(weight).toLocaleString()} lbs with brakes-on speed of ${brakesOnSpd} KCAS, the braking kinetic energy is ${result.landBke} MFP.${windNote}`});
           }
-          if(result.taxiBke>0)lines.push({icon:"🚕",text:`Taxi adds ${result.taxiBke} MFP (${taxiDist} mi × 2.5 MFP/mi${Number(slopePct)>0?" + "+slopePct+"% slope correction":""}), bringing the total to ${result.totalLanding} MFP.`});
+          if(result.taxiBke>0)lines.push({icon:"🚕",text:`Taxi adds ${result.taxiBke} MFP (${taxiDist} mi × 2.5 MFP/mi${toNum(slopePct)>0?" + "+slopePct+"% slope correction":""}), bringing the total to ${result.totalLanding} MFP.`});
           lines.push({icon:result.zone.icon,text:`This puts the brakes in the ${result.zone.zone} zone. ${result.zone.zone==="NORMAL"?"Fuseplug release is not likely, but cooling time should be observed before subsequent operations.":result.zone.zone==="CAUTION"?"Fuseplug release is possible. Move the airplane clear and allow brakes to cool.":"Fuseplug release is probable within 2-30 minutes. Evacuate immediately."}`});
           lines.push({icon:"❄️",text:`Full cooling to restore 142.3 MFP capacity requires approximately ${fmtHrs(result.coolingFull)}.`});
           if(mode==="turnaround"&&result.cumulative!=null){
-            lines.push({icon:"🔄",text:`A rejected takeoff at ${Number(toWeight).toLocaleString()} lbs / V1 ${toV1} kts would add ${result.totalTo} MFP, for a cumulative total of ${result.cumulative} MFP against the 142.3 MFP maximum.`});
+            lines.push({icon:"🔄",text:`A rejected takeoff at ${toNum(toWeight).toLocaleString()} lbs / V1 ${toV1} kts would add ${result.totalTo} MFP, for a cumulative total of ${result.cumulative} MFP against the 142.3 MFP maximum.`});
             if(result.exceedsMax)lines.push({icon:"⏱️",text:`The cumulative energy exceeds capacity by ${result.excess} MFP. You must wait at least ${fmtHrs(result.cooldownNeeded)} after landing before attempting takeoff to dissipate the excess energy.`});
             else lines.push({icon:"✅",text:"The cumulative energy is within the 142.3 MFP maximum. No additional cooling delay is required before takeoff."});
           }
@@ -2469,11 +2527,11 @@ function parseOcrDutyTrip(text){
   function parseTime(raw){
     if(!raw)return{h:0,m:0};
     const s=raw.replace(/[^0-9:]/g,"");
-    if(s.includes(":")){const p=s.split(":");return{h:Number(p[0]),m:Number(p[1]||0)};}
+    if(s.includes(":")){const p=s.split(":");return{h:toNum(p[0]),m:toNum(p[1]||0)};}
     // No colon: HHMM or HMM
-    if(s.length>=4)return{h:Number(s.slice(0,-2)),m:Number(s.slice(-2))};
-    if(s.length===3)return{h:Number(s[0]),m:Number(s.slice(1))};
-    return{h:Number(s),m:0};
+    if(s.length>=4)return{h:toNum(s.slice(0,-2)),m:toNum(s.slice(-2))};
+    if(s.length===3)return{h:toNum(s[0]),m:toNum(s.slice(1))};
+    return{h:toNum(s),m:0};
   }
 
   const flightTimeRe=/\((\d+):(\d{2})\)/;
@@ -2489,7 +2547,7 @@ function parseOcrDutyTrip(text){
       // Find day number on same line or adjacent
       for(let dd=Math.max(0,i-1);dd<=Math.min(i+1,lines.length-1);dd++){
         const nums=lines[dd].replace(monthRe,"").match(/\b(\d{1,2})\b/g);
-        if(nums){for(const n of nums){const nv=Number(n);if(nv>=1&&nv<=31){curDate={day:nv,month,year2:25};break;}}}
+        if(nums){for(const n of nums){const nv=toNum(n);if(nv>=1&&nv<=31){curDate={day:nv,month,year2:25};break;}}}
       }
     }
 
@@ -2505,11 +2563,11 @@ function parseOcrDutyTrip(text){
       // Don't cross into another route
       if(j>i&&findRoute(lines[j]))break;
       const ftm=lines[j].match(flightTimeRe);
-      if(ftm&&!flightMins)flightMins=Number(ftm[1])*60+Number(ftm[2]);
+      if(ftm&&!flightMins)flightMins=toNum(ftm[1])*60+toNum(ftm[2]);
       const frm=lines[j].match(flightRe);
-      if(frm&&!flightMins)flightMins=Number(frm[1])*60+Number(frm[2]);
+      if(frm&&!flightMins)flightMins=toNum(frm[1])*60+toNum(frm[2]);
       const rrm=lines[j].match(restRe);
-      if(rrm){hasRest=true;restMins=Number(rrm[1])*60+Number(rrm[2]);}
+      if(rrm){hasRest=true;restMins=toNum(rrm[1])*60+toNum(rrm[2]);}
     }
     // Also check the line before this route for Rest (it belongs to the previous leg)
     // and the Duty/Flight/Rest line AFTER the flight time parens for this leg
@@ -2534,7 +2592,7 @@ function parseOcrDutyTrip(text){
         if(route&&route.origin===legs[li].origin&&route.dest===legs[li].dest)lastLegIdx=li;
       }
     }
-    if(lastLegIdx>=0){legs[lastLegIdx].hasRest=true;legs[lastLegIdx].restMins=Number(rrm[1])*60+Number(rrm[2]);}
+    if(lastLegIdx>=0){legs[lastLegIdx].hasRest=true;legs[lastLegIdx].restMins=toNum(rrm[1])*60+toNum(rrm[2]);}
   }
 
   if(legs.length===0)return null;
@@ -2571,7 +2629,7 @@ function parseCrewScheduleOcr(text){
     if(s.length>=4)s=s.slice(0,4);        // strip trailing OCR junk: 5+ digits → first 4
     else if(s.length===3)s="0"+s;          // HMM → 0HMM
     else return null;
-    const h=Number(s.slice(0,2)),m=Number(s.slice(2,4));
+    const h=toNum(s.slice(0,2)),m=toNum(s.slice(2,4));
     if(!Number.isFinite(h)||!Number.isFinite(m)||h>23||m>59)return null;
     return{h,m,min:h*60+m};
   }
@@ -2585,13 +2643,13 @@ function parseCrewScheduleOcr(text){
     const month=mm[1].toUpperCase();
     for(let dd=i;dd<=Math.min(i+1,lines.length-1)&&!curDate;dd++){
       const nums=lines[dd].replace(monthRe,"").match(/\b\d{1,2}\b/g);
-      if(nums)for(const n of nums){const nv=Number(n);if(nv>=1&&nv<=31){curDate={day:nv,month,year2:25};break;}}
+      if(nums)for(const n of nums){const nv=toNum(n);if(nv>=1&&nv<=31){curDate={day:nv,month,year2:25};break;}}
     }
   }
   // DST-aware offset for the schedule's date (ICAO_IANA primary, ICAO_TZ fallback).
   // undefined when unknown so callers can borrow the other endpoint's offset.
   const ocrJsDate=jsDateFromLegDate(curDate);
-  function knownOffset(icao){const v=getIcaoOffset(icao,ocrJsDate);return v===null?undefined:Number(v);}
+  function knownOffset(icao){const v=getIcaoOffset(icao,ocrJsDate);return v===null?undefined:toNum(v);}
 
   // Robust time extraction from a line: returns every valid {h,m,min} it can read,
   // accepting HH:MM or bare HHMM (3–4 digits), tolerating an "L" suffix and ANY junk
@@ -2603,8 +2661,8 @@ function parseCrewScheduleOcr(text){
     let m;
     while((m=re.exec(line))){
       let h,mm;
-      if(m[1]!==undefined){h=Number(m[1]);mm=Number(m[2]);}
-      else{const s=m[3].length===3?"0"+m[3]:m[3];h=Number(s.slice(0,2));mm=Number(s.slice(2,4));}
+      if(m[1]!==undefined){h=toNum(m[1]);mm=toNum(m[2]);}
+      else{const s=m[3].length===3?"0"+m[3]:m[3];h=toNum(s.slice(0,2));mm=toNum(s.slice(2,4));}
       if(Number.isFinite(h)&&Number.isFinite(mm)&&h<=23&&mm<=59)out.push({h,m:mm,min:h*60+mm});
     }
     return out;
@@ -2718,9 +2776,9 @@ function parseDutyTrip(text){
     let d=null,m=null,y=null;
     for(let scan=startIdx;scan<Math.min(startIdx+6,lines.length);scan++){
       const ln=lines[scan];
-      if(dayRe.test(ln)&&!m&&Number(ln)<=31&&Number(ln)>=1)d=Number(ln);
+      if(dayRe.test(ln)&&!m&&toNum(ln)<=31&&toNum(ln)>=1)d=toNum(ln);
       else if(monthRe.test(ln.toUpperCase()))m=ln.toUpperCase();
-      else if(yearRe.test(ln)&&m&&d)y=Number(ln);
+      else if(yearRe.test(ln)&&m&&d)y=toNum(ln);
       else if(timeRe.test(ln))break;
     }
     if(d&&m&&y)return{day:d,month:m,year2:y};
@@ -2733,7 +2791,7 @@ function parseDutyTrip(text){
   i=0;
   while(i<lines.length){
     const ln=lines[i];
-    if(dayRe.test(ln)&&Number(ln)>=1&&Number(ln)<=31){
+    if(dayRe.test(ln)&&toNum(ln)>=1&&toNum(ln)<=31){
       const pd=tryParseDate(i);
       if(pd){curDate=pd;i++;continue;}
     }
@@ -2742,7 +2800,7 @@ function parseDutyTrip(text){
 
     const depMatch=ln.match(timeRe);
     if(!depMatch){i++;continue;}
-    const depH=Number(depMatch[1]),depM=Number(depMatch[2]);
+    const depH=toNum(depMatch[1]),depM=toNum(depMatch[2]);
     let origin=null,dest=null,arrH=null,arrM=null,flightMins=null,hasRest=false,restMins=null;
     let j=i+1;
     while(j<lines.length&&!icaoRe.test(lines[j])){
@@ -2753,18 +2811,18 @@ function parseDutyTrip(text){
     if(j<lines.length&&icaoRe.test(lines[j])){dest=lines[j];j++;}else{i++;continue;}
     while(j<lines.length){
       const am=lines[j].match(timeRe);
-      if(am){arrH=Number(am[1]);arrM=Number(am[2]);j++;break;}
+      if(am){arrH=toNum(am[1]);arrM=toNum(am[2]);j++;break;}
       j++;
     }
     if(arrH===null){i++;continue;}
     let scanEnd=Math.min(j+10,lines.length);
     for(let k=j;k<scanEnd;k++){
       const ftm=lines[k].match(flightTimeRe);
-      if(ftm)flightMins=Number(ftm[1])*60+Number(ftm[2]);
+      if(ftm)flightMins=toNum(ftm[1])*60+toNum(ftm[2]);
       const frm=lines[k].match(flightRe);
-      if(frm&&!flightMins)flightMins=Number(frm[1])*60+Number(frm[2]);
+      if(frm&&!flightMins)flightMins=toNum(frm[1])*60+toNum(frm[2]);
       const rm=lines[k].match(restRe);
-      if(rm){hasRest=true;restMins=Number(rm[1])*60+Number(rm[2]);}
+      if(rm){hasRest=true;restMins=toNum(rm[1])*60+toNum(rm[2]);}
       if(k>j+1&&timeRe.test(lines[k])&&!dutyRe.test(lines[k])&&!flightRe.test(lines[k])&&!restRe.test(lines[k]))break;
     }
     if(!flightMins){let ft=(arrH*60+arrM)-(depH*60+depM);if(ft<0)ft+=1440;flightMins=ft;}
@@ -3335,7 +3393,7 @@ function FlightDutyCalc(){
     if(off!==null)return off;
     const s=sessionTz[icao];
     if(s===undefined||s===""||isNaN(s))return null;
-    return Number(s);
+    return toNum(s);
   }
   // Normalize HH:MM input. "0800" → "08:00", strips non-digit/colon, caps 5.
   // Partial input stays partial (so backspace + retype works).
@@ -3346,7 +3404,7 @@ function FlightDutyCalc(){
   }
   function hhmmToMin(s){
     if(!s||s.length!==5||s[2]!==":")return null;
-    const h=Number(s.slice(0,2)),m=Number(s.slice(3,5));
+    const h=toNum(s.slice(0,2)),m=toNum(s.slice(3,5));
     if(!Number.isFinite(h)||!Number.isFinite(m))return null;
     return h*60+m;
   }
@@ -3424,15 +3482,15 @@ function FlightDutyCalc(){
       if(!ml.origin||!ml.dest||!ml.depTime||!ml.arrTime){setParseError("Fill in all fields for leg "+(i+1));return;}
       const depParts=ml.depTime.split(":"),arrParts=ml.arrTime.split(":");
       if(depParts.length<2||arrParts.length<2){setParseError("Use HH:MM format for times on leg "+(i+1));return;}
-      const depH=Number(depParts[0]),depM=Number(depParts[1]);
-      const arrH=Number(arrParts[0]),arrM=Number(arrParts[1]);
+      const depH=toNum(depParts[0]),depM=toNum(depParts[1]);
+      const arrH=toNum(arrParts[0]),arrM=toNum(arrParts[1]);
       let flightMins=(arrH*60+arrM)-(depH*60+depM);if(flightMins<0)flightMins+=1440;
       let date=null;
       if(ml.date){
         const dp=ml.date.split("-");
         if(dp.length===3){
           const monthNames=["","JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-          date={day:Number(dp[2]),month:monthNames[Number(dp[1])],year2:Number(dp[0].slice(-2))};
+          date={day:toNum(dp[2]),month:monthNames[toNum(dp[1])],year2:toNum(dp[0].slice(-2))};
         }
       }
       legs.push({origin:ml.origin.toUpperCase(),dest:ml.dest.toUpperCase(),depH,depM,arrH,arrM,flightMins,hasRest:false,restMins:null,date,crewMode:ml.crewMode||crewMode,isLocal:ml.mode==="L"});
@@ -3454,7 +3512,7 @@ function FlightDutyCalc(){
     let legs=[...parsed.legs];
     const missing=legs.findIndex(l=>l.needsTimes||l.depH===null||l.depH===undefined||l.arrH===null||l.arrH===undefined);
     if(missing>=0){setParseError("Leg "+(missing+1)+" is missing times — tap Edit to enter them.");return;}
-    if(needDate&&startDay)legs[0]={...legs[0],date:{day:Number(startDay),month:startMonth,year2:Number(startYear)}};
+    if(needDate&&startDay)legs[0]={...legs[0],date:{day:toNum(startDay),month:startMonth,year2:toNum(startYear)}};
     if(!legs[0].date){setParseError("Enter the start date for leg 1.");return;}
     const resolved=resolveLegTimes(legs);
     const periods=groupDutyPeriods(resolved);
@@ -3462,7 +3520,7 @@ function FlightDutyCalc(){
     // rest-before, max leg → duty/flight/rest-after). A fresh calc starts with no manual
     // DP overrides; the per-period selector in the results view can still force a period.
     setCrewOverrides({});
-    const analysis=computeDutyAnalysis(periods,crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,customOffsets,{});
+    const analysis=computeDutyAnalysis(periods,crewMode,toNum(dutyOnDef)||0,toNum(dutyOffDef)||0,customOffsets,{});
     setResult(analysis);
   }
 
@@ -3472,11 +3530,11 @@ function FlightDutyCalc(){
   function recomputeWith(overrides,gMode,offsetsArg){
     if(!parsed)return;
     let legs=[...parsed.legs];
-    if(needDate&&startDay)legs[0]={...legs[0],date:{day:Number(startDay),month:startMonth,year2:Number(startYear)}};
+    if(needDate&&startDay)legs[0]={...legs[0],date:{day:toNum(startDay),month:startMonth,year2:toNum(startYear)}};
     if(!legs[0].date)return;
     const resolved=resolveLegTimes(legs);
     const periods=groupDutyPeriods(resolved);
-    const analysis=computeDutyAnalysis(periods,gMode??crewMode,Number(dutyOnDef)||0,Number(dutyOffDef)||0,offsetsArg||customOffsets,overrides);
+    const analysis=computeDutyAnalysis(periods,gMode??crewMode,toNum(dutyOnDef)||0,toNum(dutyOffDef)||0,offsetsArg||customOffsets,overrides);
     setResult(analysis);
   }
 
@@ -3485,8 +3543,8 @@ function FlightDutyCalc(){
   // recompute that period's Duty On/Off + duty check without clearing the results.
   function setPeriodOffset(pi,field,rawText){
     const clean=rawText.replace(/[^0-9]/g,"").slice(0,3);
-    const cur=customOffsets[pi]||{on:Number(dutyOnDef)||0,off:Number(dutyOffDef)||0};
-    const next={...customOffsets,[pi]:{...cur,[field]:clean===""?"":Number(clean)}};
+    const cur=customOffsets[pi]||{on:toNum(dutyOnDef)||0,off:toNum(dutyOffDef)||0};
+    const next={...customOffsets,[pi]:{...cur,[field]:clean===""?"":toNum(clean)}};
     setCustomOffsets(next);
     if(result)recomputeWith(crewOverrides,undefined,next);
   }
@@ -3806,7 +3864,7 @@ function FlightDutyCalc(){
             <span style={{fontSize:13,fontWeight:700,color:C.text,minWidth:50}}>{icao}</span>
             <span style={{fontSize:11,color:C.muted}}>UTC</span>
             <input type="number" min="-12" max="14" step="1" value={sessionTz[icao]!==undefined?sessionTz[icao]:""} placeholder="±0"
-              onChange={e=>{const v=Number(e.target.value);setSessionTz(prev=>({...prev,[icao]:v}));setUnknownIcaos(prev=>{const n={...prev};delete n[icao];return n;});}}
+              onChange={e=>{const v=toNum(e.target.value);setSessionTz(prev=>({...prev,[icao]:v}));setUnknownIcaos(prev=>{const n={...prev};delete n[icao];return n;});}}
               style={{width:70,background:C.inputBg,border:"1.5px solid "+C.border,borderRadius:8,padding:"8px",color:C.text,fontSize:14,fontWeight:700,textAlign:"center"}}/>
           </div>))}
       </div>}
@@ -3826,7 +3884,7 @@ function FlightDutyCalc(){
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
         {[{label:"Before first leg (min 30)",val:dutyOnDef,set:setDutyOnDef,min:30},
           {label:"After last leg (min 10)",val:dutyOffDef,set:setDutyOffDef,min:10}].map(({label,val,set,min})=>{
-          const n=Number(val);
+          const n=toNum(val);
           const below=val!==""&&Number.isFinite(n)&&n<min;
           return(<div key={label}>
             <div style={{fontSize:10,color:C.muted,marginBottom:4}}>{label}</div>
@@ -4045,7 +4103,7 @@ function FlightDutyCalc(){
           // DST-aware: offset computed for the leg's actual date (ICAO_IANA), then
           // legacy ICAO_TZ, then a manual sessionTz number.
           let offset=getIcaoOffset(icao,jsDateFromLegDate(dObj));
-          if(offset===null){const sTz=sessionTz[icao];offset=(sTz!==undefined&&sTz!==""&&!isNaN(sTz))?Number(sTz):null;}
+          if(offset===null){const sTz=sessionTz[icao];offset=(sTz!==undefined&&sTz!==""&&!isNaN(sTz))?toNum(sTz):null;}
           if(offset===null)return null;
           const total=((h*60+m)+offset*60+1440*7)%1440;
           return`${pad(Math.floor(total/60))}:${pad(total%60)}`;
@@ -4231,10 +4289,10 @@ export default function E6B(){
   useEffect(()=>{
     if(!calcRef.current)return;
     const res=[];
-    let chainedFob=Number(initialFob||0);
+    let chainedFob=toNum(initialFob||0);
     for(let i=0;i<legs.length;i++){
       const leg=legs[i];
-      const fobForLeg=i===0?Number(initialFob||0):(leg.useOverride?Number(leg.fobOverride||0):chainedFob);
+      const fobForLeg=i===0?toNum(initialFob||0):(leg.useOverride?toNum(leg.fobOverride||0):chainedFob);
       const r=calcLeg(currentAc,leg,globalAlt,reserveFuel,fobForLeg,legs[i+1]||null);
       res.push(r);chainedFob=r.arrivalFob;
     }
@@ -4268,10 +4326,10 @@ export default function E6B(){
 
   function runCalc(){
     const res=[];
-    let chainedFob=Number(initialFob||0);
+    let chainedFob=toNum(initialFob||0);
     for(let i=0;i<legs.length;i++){
       const leg=legs[i];
-      const fobForLeg=i===0?Number(initialFob||0):(leg.useOverride?Number(leg.fobOverride||0):chainedFob);
+      const fobForLeg=i===0?toNum(initialFob||0):(leg.useOverride?toNum(leg.fobOverride||0):chainedFob);
       const r=calcLeg(currentAc,leg,globalAlt,reserveFuel,fobForLeg,legs[i+1]||null);
       res.push(r);chainedFob=r.arrivalFob;
     }
@@ -4369,14 +4427,20 @@ export default function E6B(){
   function FobField(){
     const[showPad,setShowPad]=useState(false);
     const hasKb=useHasKeyboard();
-    const[local,setLocal]=useState(initialFob);
+    // Same contract as Field: grouped while idle, raw while editing, normalised on commit.
+    const[local,setLocal]=useState(()=>groupNum(initialFob));
     const focusedRef=useRef(false);
-    useEffect(()=>{if(!focusedRef.current)setLocal(initialFob);},[initialFob]);
-    const commit=()=>{focusedRef.current=false;if(local!==initialFob)setInitialFob(local);};
+    useEffect(()=>{if(!focusedRef.current)setLocal(groupNum(initialFob));},[initialFob]);
+    const commit=()=>{
+      focusedRef.current=false;
+      const clean=normNum(local);
+      setLocal(groupNum(clean));
+      if(clean!==initialFob)setInitialFob(clean);
+    };
     if(hasKb)return(<div style={{position:"relative"}}>
       <input type="text" inputMode="decimal" value={local}
         onChange={e=>setLocal(e.target.value)}
-        onFocus={e=>{focusedRef.current=true;e.target.select();}}
+        onFocus={e=>{focusedRef.current=true;e.target.select();setLocal(normNum(local));}}
         onBlur={commit}
         onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();commit();e.target.blur();}}}
         style={{width:"100%",background:C.inputBg,border:"1.5px solid "+C.accent+"55",borderRadius:8,padding:"11px 40px 11px 14px",color:C.text,fontSize:16,fontWeight:700,outline:"none",boxSizing:"border-box"}}/>
@@ -4384,16 +4448,16 @@ export default function E6B(){
         style={{position:"absolute",right:7,top:"50%",transform:"translateY(-50%)",background:C.accent+"1a",border:"1px solid "+C.accent+"44",borderRadius:6,padding:"4px 6px",fontSize:14,lineHeight:1,cursor:"pointer",color:C.accent}}>🔢</button>
       {showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
         <NumPad value={initialFob} label="Fuel On Board (lbs)" step="100"
-          onChange={v=>{setLocal(v);setInitialFob(v);setShowPad(false);}}
+          onChange={v=>{const c=normNum(v);setLocal(groupNum(c));setInitialFob(c);setShowPad(false);}}
           onClose={()=>setShowPad(false)}/>
       </NumPadOverlay>}
     </div>);
     return(<div style={{position:"relative"}}>
-      <input readOnly value={initialFob} onClick={()=>setShowPad(true)}
+      <input readOnly value={groupNum(initialFob)} onClick={()=>setShowPad(true)}
         style={{width:"100%",background:C.inputBg,border:"1.5px solid "+C.accent+"55",borderRadius:8,padding:"11px 14px",color:C.text,fontSize:16,fontWeight:700,outline:"none",boxSizing:"border-box",cursor:"pointer"}}/>
       {showPad&&<NumPadOverlay onClose={()=>setShowPad(false)}>
         <NumPad value={initialFob} label="Fuel On Board (lbs)" step="100"
-          onChange={v=>{setInitialFob(v);setShowPad(false);}}
+          onChange={v=>{setInitialFob(normNum(v));setShowPad(false);}}
           onClose={()=>setShowPad(false)}/>
       </NumPadOverlay>}
     </div>);
@@ -4486,7 +4550,7 @@ export default function E6B(){
             <div style={{background:C.bg,borderRadius:10,border:"1.5px solid "+C.accent+"55",padding:"12px 14px",marginBottom:10}}>
               <div style={{fontSize:11,fontWeight:700,color:C.accent,textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>⛽ Fuel On Board at Departure (lbs)</div>
               <FobField/>
-              {initialFob>0&&<div style={{fontSize:11,color:C.muted,marginTop:5}}>≈{(Number(initialFob)/6.7).toFixed(0)} gal · {(Number(initialFob)/1.77).toFixed(0)} L</div>}
+              {initialFob>0&&<div style={{fontSize:11,color:C.muted,marginTop:5}}>≈{(toNum(initialFob)/6.7).toFixed(0)} gal · {(toNum(initialFob)/1.77).toFixed(0)} L</div>}
               <div style={{fontSize:11,color:C.muted,marginTop:4}}>Enter actual FOB before first leg. Subsequent legs auto-calculated.</div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
@@ -4553,7 +4617,7 @@ export default function E6B(){
                 <div key={i} style={{marginBottom:i<results.length-1?12:0,paddingBottom:i<results.length-1?12:0,borderBottom:i<results.length-1?"1px solid "+C.border:"none",fontSize:12,color:C.sub,lineHeight:1.9}}>
                   <div style={{color:C.text,fontWeight:700,marginBottom:4}}>Leg {i+1}: {legs[i].from}→{legs[i].to}</div>
                   <div>FOB at dep: {fL(r.fob)}</div>
-                  <div>Burn: {fL(r.baseBurn)} · Reserve: {fL(Number(reserveFuel))}</div>
+                  <div>Burn: {fL(r.baseBurn)} · Reserve: {fL(toNum(reserveFuel))}</div>
                   <div>Trip fuel needed: {fL(r.tripFuel)}</div>
                   <div>Price diff: {sym}{(r.priceDiff||0).toFixed(3)}/lb</div>
                   <div>Extra loaded: {fL(r.tankerLbs)}</div>
