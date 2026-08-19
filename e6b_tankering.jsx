@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.63";
+const APP_VERSION="1.64";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -418,7 +418,13 @@ function tankerSnapshot(st){
     currency:st.currency,
     units:"lbs",              // fuel quantities are lbs throughout; gal/L are derived
     reserveFuel:normNum(st.reserveFuel),
-    zfw:normNum(st.zfw),
+    zfw:normNum(st.zfw),                 // canonical value the engine consumes
+    // How it was entered. Additive to the v2 schema: an older build ignores
+    // these and still reads `zfw`, and a file without them loads as direct entry.
+    zfwMode:st.zfwMode==="direct"?"direct":"split",
+    zfwBow:normNum(st.zfwBow),
+    zfwPayload:normNum(st.zfwPayload),
+    zfwDirect:normNum(st.zfwDirect),
     initialFob:normNum(st.initialFob),
     calculated:!!st.calculated,
     // Canonicalised on the way out too, so an exported file never carries a
@@ -449,6 +455,13 @@ function tankerSnapshotToState(data,knownAircraftIds){
     currency:cur,
     reserveFuel:data.reserveFuel!=null&&data.reserveFuel!==""?normNum(data.reserveFuel):"6000",
     zfw:data.zfw!=null?normNum(data.zfw):"",
+    // A file written before the split existed carries only `zfw`; show it as a
+    // direct entry so the number the user saved is exactly what they see.
+    zfwMode:data.zfwMode==="direct"||data.zfwMode==="split"?data.zfwMode
+      :(data.zfw!=null&&normNum(data.zfw)!==""?"direct":"split"),
+    zfwBow:data.zfwBow!=null?normNum(data.zfwBow):"",
+    zfwPayload:data.zfwPayload!=null?normNum(data.zfwPayload):"",
+    zfwDirect:data.zfwDirect!=null?normNum(data.zfwDirect):(data.zfw!=null?normNum(data.zfw):""),
     initialFob:data.initialFob!=null?normNum(data.initialFob):"",
     calculated:!!data.calculated,
     legs,
@@ -968,10 +981,10 @@ function parseTripSheetPDF(text){
 }
 
 // ── Brief builder ─────────────────────────────────────────────────────────
-function buildBrief(legs,results,totalSavings,currency,aircraft,reserveFuel,zfw){
+function buildBrief(legs,results,totalSavings,currency,aircraft,reserveFuel,zfw,zfwNote){
   const sym=currency.symbol,pos=totalSavings>0;
   const route=legs.map((l,i)=>i===0?l.from+"→"+l.to:l.to).join("→");
-  return{legs,results,totalSavings,route,sym,pos,aircraft,currency,reserveFuel,zfw,ts:new Date().toLocaleString()};
+  return{legs,results,totalSavings,route,sym,pos,aircraft,currency,reserveFuel,zfw,zfwNote,ts:new Date().toLocaleString()};
 }
 
 // ── NumPad ────────────────────────────────────────────────────────────────
@@ -1627,7 +1640,7 @@ function briefFileStem(legs){
 }
 
 function buildPrintHtml(brief){
-  const{legs,results,totalSavings,route,sym,pos,aircraft,reserveFuel,zfw,ts}=brief;
+  const{legs,results,totalSavings,route,sym,pos,aircraft,reserveFuel,zfw,zfwNote,ts}=brief;
   const totalExtra=results.reduce((a,r)=>a+(r?.tankerLbs||0),0);
   const mustTanker=results.some(r=>r&&r.decision==="MUST TANKER");
   const verdict=mustTanker?"MUST TANKER":pos?"TANKER":"NO TANKER";
@@ -1638,7 +1651,7 @@ function buildPrintHtml(brief){
     ["Total Extra Fuel",totalExtra>0?fL(totalExtra)+" ("+fG(totalExtra)+")":"none"],
     ["Legs",String(legs.length)],
     ["Reserve",fL(reserveFuel)],
-    ["Zero Fuel Weight",zfwUsed?fL(zfwUsed):"—"],
+    ["Zero Fuel Weight",zfwUsed?fL(zfwUsed)+(zfwNote&&zfwNote!=="entered directly"?" ("+zfwNote+")":""):"—"],
     ["Aircraft",aircraft.name||"GV"],
   ];
 
@@ -4623,7 +4636,15 @@ export default function E6B(){
   const[calculated,setCalculated]=useState(false);
   const[editingAc,setEditingAc]=useState(null);
   const[reserveFuel,setReserveFuel]=useState("6000");
-  const[zfw,setZfw]=useState("");   // blank = fall back to aircraft BOW
+  // ZFW is the single value the engine consumes, but it is *derived* — the
+  // default entry mode is BOW + payload so nobody can quietly type an empty
+  // weight (which is lighter than BOW and would make the MLW cap dangerously
+  // optimistic). Direct entry stays available for crews reading a ZFW straight
+  // off a W&B release.
+  const[zfwMode,setZfwMode]=useState("split");   // "split" | "direct"
+  const[zfwBow,setZfwBow]=useState("");          // blank = use the aircraft profile's BOW
+  const[zfwPayload,setZfwPayload]=useState("");  // pax + cargo
+  const[zfwDirect,setZfwDirect]=useState("");
   const[initialFob,setInitialFob]=useState("");
   const[legs,setLegs]=useState([newLeg(),newLeg()]);
   const[importing,setImporting]=useState(false);
@@ -4644,6 +4665,27 @@ export default function E6B(){
   const draftReadyRef=useRef(false);
   const draftTimerRef=useRef(null);
 
+  const currentAc=aircraftId==="gv"?GV:profiles.find(p=>p.id===aircraftId)||GV;
+  const sym=currency.symbol;
+  const acOpts=[{v:"gv",l:"Gulfstream V (GV)"},...profiles.map(p=>({v:p.id,l:p.name}))];
+
+  // Derived ZFW. In split mode it stays blank until the user actually enters
+  // something, so an untouched form keeps the conservative "fall back to BOW and
+  // warn" behaviour rather than silently claiming a zero payload.
+  const acBow=toNum(currentAc.bow,48557);
+  const bowUsed=normNum(zfwBow)!==""?toNum(zfwBow,acBow):acBow;
+  const payloadUsed=toNum(zfwPayload,0);
+  const splitTouched=normNum(zfwBow)!==""||normNum(zfwPayload)!=="";
+  const zfw=zfwMode==="direct"?normNum(zfwDirect):(splitTouched?String(bowUsed+payloadUsed):"");
+  // How the ZFW was arrived at — echoed into the brief so it can be checked
+  // against a W&B release.
+  const zfwNote=zfwMode==="direct"?"entered directly"
+    :splitTouched?"BOW "+fL(bowUsed)+" + payload "+fL(payloadUsed):"";
+  const zfwIsAssumed=toNum(zfw,0)<=0&&!legs.some(l=>toNum(l.payload,0)>0);
+  // Split mode with a BOW but no payload is still BOW-only, so it earns the same
+  // caution even though a ZFW figure now exists.
+  const zfwNoPayload=zfwMode==="split"&&splitTouched&&payloadUsed<=0&&!legs.some(l=>toNum(l.payload,0)>0);
+
   useEffect(()=>{(async()=>{
     const h=await recall("e6b:hist");if(h)setHistory(h);
     const p=await recall("e6b:profiles");if(p)setProfiles(p);
@@ -4652,7 +4694,8 @@ export default function E6B(){
       const st=tankerSnapshotToState(draft,(p||[]).map(x=>x.id));
       setAircraftId(st.aircraftId);setCurrency(st.currency);
       setReserveFuel(st.reserveFuel);
-      setInitialFob(st.initialFob);setLegs(st.legs);setZfw(st.zfw);
+      setInitialFob(st.initialFob);setLegs(st.legs);
+      setZfwMode(st.zfwMode);setZfwBow(st.zfwBow);setZfwPayload(st.zfwPayload);setZfwDirect(st.zfwDirect);
       if(st.calculated){
         const ac=st.aircraftId==="gv"?GV:(p||[]).find(x=>x.id===st.aircraftId)||GV;
         setResults(computeLegs(st.legs,st.initialFob,ac,st.reserveFuel,st.zfw));
@@ -4668,14 +4711,11 @@ export default function E6B(){
     if(!draftReadyRef.current)return;
     if(draftTimerRef.current)clearTimeout(draftTimerRef.current);
     draftTimerRef.current=setTimeout(()=>{
-      store(TANKER_DRAFT_KEY,tankerSnapshot({aircraftId,currency,reserveFuel,zfw,initialFob,calculated,legs}));
+      store(TANKER_DRAFT_KEY,tankerSnapshot({aircraftId,currency,reserveFuel,zfw,zfwMode,zfwBow,zfwPayload,zfwDirect,initialFob,calculated,legs}));
     },500);
     return()=>{if(draftTimerRef.current)clearTimeout(draftTimerRef.current);};
-  },[aircraftId,currency,reserveFuel,zfw,initialFob,calculated,legs]);
+  },[aircraftId,currency,reserveFuel,zfw,zfwMode,zfwBow,zfwPayload,zfwDirect,initialFob,calculated,legs]);
 
-  const currentAc=aircraftId==="gv"?GV:profiles.find(p=>p.id===aircraftId)||GV;
-  const sym=currency.symbol;
-  const acOpts=[{v:"gv",l:"Gulfstream V (GV)"},...profiles.map(p=>({v:p.id,l:p.name}))];
 
   // Auto-recalculate when inputs change and results are already showing
   const calcRef=useRef(false);
@@ -4731,14 +4771,14 @@ export default function E6B(){
   const canExportPdf=calculated&&results.length>0;
   function exportBriefPdf(){
     if(!canExportPdf){flashTripMsg("Run a calculation first",true);return;}
-    const brief=buildBrief(legs,results,totalSavings,currency,currentAc,reserveFuel,zfw);
+    const brief=buildBrief(legs,results,totalSavings,currency,currentAc,reserveFuel,zfw,zfwNote);
     if(!printBrief(brief))flashTripMsg("❌ Could not open the print view",true);
   }
 
   function exportTrip(){
     const payload={app:"E6B",type:TANKER_FILE_TYPE,version:TANKER_FILE_VERSION,
       savedAt:new Date().toISOString(),
-      data:tankerSnapshot({aircraftId,currency,reserveFuel,zfw,initialFob,calculated,legs})};
+      data:tankerSnapshot({aircraftId,currency,reserveFuel,zfw,zfwMode,zfwBow,zfwPayload,zfwDirect,initialFob,calculated,legs})};
     // The download itself is the confirmation; only surface a message if it failed.
     if(!downloadJson(tankerFileName(legs),payload))flashTripMsg("❌ Could not create the download",true);
   }
@@ -4761,7 +4801,8 @@ export default function E6B(){
     if(!st.legs.length){flashTripMsg("❌ Not a valid E6B tanker trip file",true);return;}
     setAircraftId(st.aircraftId);setCurrency(st.currency);
     setReserveFuel(st.reserveFuel);
-    setInitialFob(st.initialFob);setLegs(st.legs);setZfw(st.zfw);
+    setInitialFob(st.initialFob);setLegs(st.legs);
+    setZfwMode(st.zfwMode);setZfwBow(st.zfwBow);setZfwPayload(st.zfwPayload);setZfwDirect(st.zfwDirect);
     const ac=st.aircraftId==="gv"?GV:profiles.find(x=>x.id===st.aircraftId)||GV;
     setResults(computeLegs(st.legs,st.initialFob,ac,st.reserveFuel,st.zfw));
     setCalculated(true);calcRef.current=true;
@@ -4859,7 +4900,6 @@ export default function E6B(){
 
   // Blank ZFW with no per-leg payload anywhere means the MLW check is running
   // against bare BOW, which is optimistic — surface that in the input.
-  const zfwIsAssumed=toNum(zfw,0)<=0&&!legs.some(l=>toNum(l.payload,0)>0);
   const totalSavings=results.reduce((s,r)=>s+(r?.savings||0),0);
   const totalExtra=results.reduce((s,r)=>s+(r?.tankerLbs||0),0);
 
@@ -5016,16 +5056,54 @@ export default function E6B(){
             </div>
             {/* Cruise altitude lives on each leg card — legs cruise at different levels. */}
             <Field label="Reserve Fuel (lbs)" value={reserveFuel} onChange={setReserveFuel} step="100" fieldId="reserve"/>
-            {/* ZFW drives the MTOW and MLW ceilings on how much fuel can legally be loaded. */}
-            <div style={{marginTop:10,background:C.bg,borderRadius:10,border:"1.5px solid "+(zfwIsAssumed?C.amber:C.border)+"88",padding:"12px 14px"}}>
-              <Field label="Zero Fuel Weight (lbs) — BOW + payload" value={zfw} onChange={setZfw} step="100"
-                fieldId="zfw" color={zfwIsAssumed?C.amber:C.accent} placeholder={groupNum(String(currentAc.bow||48557))}/>
-              <div style={{fontSize:11,color:zfwIsAssumed?C.amber:C.muted,marginTop:5,lineHeight:1.5}}>
-                {zfwIsAssumed
-                  ?<>⚠ Blank — assuming BOW {fL(currentAc.bow||48557)} with no payload. The Max Landing Weight check is <b>optimistic</b>; enter your actual ZFW for a real limit.</>
-                  :<>MTOW {fL(currentAc.mtow||90500)} · MLW {fL(currentAc.mlw||0)} · max fuel {fL(currentAc.maxFuel||41300)} — fuel loads are capped to keep both takeoff and landing weight legal.</>}
-              </div>
-            </div>
+            {/* ZFW drives the MTOW and MLW ceilings on how much fuel can legally be
+                loaded, so getting it wrong is the one input that can make the
+                landing-weight cap unsafe. Default to building it from BOW +
+                payload rather than asking for a number people confuse with
+                empty weight. */}
+            {(()=>{
+              const warn=zfwIsAssumed||zfwNoPayload;
+              const tabSt=on=>({flex:1,padding:"7px 10px",borderRadius:7,fontSize:11.5,fontWeight:700,cursor:"pointer",
+                border:"1px solid "+(on?C.accent:C.border),background:on?C.accent+"1f":"transparent",
+                color:on?C.accent:C.muted});
+              return<div style={{marginTop:10,background:C.bg,borderRadius:10,border:"1.5px solid "+(warn?C.amber:C.border)+"88",padding:"12px 14px"}}>
+                <div style={{fontSize:11,fontWeight:700,color:warn?C.amber:C.accent,textTransform:"uppercase",letterSpacing:.8}}>Zero Fuel Weight (ZFW)</div>
+                <div style={{fontSize:11,color:C.muted,margin:"4px 0 10px",lineHeight:1.5}}>
+                  BOW + passengers + cargo (everything aboard except fuel).
+                  <b style={{color:warn?C.amber:C.sub}}> NOT empty weight</b> — include crew, pax, and cargo.
+                </div>
+                <div style={{display:"flex",gap:6,marginBottom:10}}>
+                  <button onClick={()=>setZfwMode("split")} style={tabSt(zfwMode==="split")}>Build from BOW + payload</button>
+                  <button onClick={()=>setZfwMode("direct")} style={tabSt(zfwMode==="direct")}>Enter ZFW directly</button>
+                </div>
+                {zfwMode==="split"
+                  ?<>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                      <Field label="BOW (lbs)" value={zfwBow} onChange={setZfwBow} step="100" fieldId="zfwbow"
+                        placeholder={groupNum(String(acBow))}/>
+                      <Field label="Payload — pax + cargo (lbs)" value={zfwPayload} onChange={setZfwPayload} step="100"
+                        fieldId="zfwpay" color={zfwNoPayload?C.amber:C.accent} placeholder="0"/>
+                    </div>
+                    <div style={{marginTop:9,padding:"8px 11px",borderRadius:8,background:(splitTouched?C.accent:C.muted)+"14",
+                      border:"1px solid "+(splitTouched?C.accent:C.border)+"55",display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                      <span style={{fontSize:11,color:C.sub}}>= Zero Fuel Weight</span>
+                      <span style={{fontSize:15,fontWeight:800,color:splitTouched?C.text:C.muted}}>
+                        {splitTouched?fL(bowUsed+payloadUsed):fL(acBow)+" (assumed)"}
+                      </span>
+                    </div>
+                  </>
+                  :<Field label="Zero Fuel Weight (lbs)" value={zfwDirect} onChange={setZfwDirect} step="100"
+                     fieldId="zfw" color={zfwIsAssumed?C.amber:C.accent}
+                     placeholder={"e.g. BOW "+groupNum(String(acBow))+" + payload"}/>}
+                <div style={{fontSize:11,color:warn?C.amber:C.muted,marginTop:8,lineHeight:1.5}}>
+                  {zfwIsAssumed
+                    ?<>⚠ Blank — assuming BOW {fL(acBow)} with no payload. The Max Landing Weight check is <b>optimistic</b>; enter your actual ZFW for a real limit.</>
+                    :zfwNoPayload
+                    ?<>⚠ BOW only — no payload entered, so this ZFW is <b>optimistic</b>. Add pax and cargo for a real Max Landing Weight limit.</>
+                    :<>Using ZFW {fL(zfw)}{zfwNote?" ("+zfwNote+")":""} · MTOW {fL(currentAc.mtow||90500)} · MLW {fL(currentAc.mlw||0)} · max fuel {fL(currentAc.maxFuel||41300)}. Fuel loads are capped to keep both takeoff and landing weight legal.</>}
+                </div>
+              </div>;
+            })()}
           </div>
 
           {/* Legs */}
@@ -5086,7 +5164,7 @@ export default function E6B(){
                   <div>Net: <span style={{color:r.savings>0?C.green:r.savings<0?C.red:C.muted,fontWeight:700}}>{r.savings>0?"+":r.savings<0?"-":""}{fM(r.savings,sym)}</span></div>
                 </div>))}
             </div>}
-            <button onClick={()=>setBriefModal(buildBrief(legs,results,totalSavings,currency,currentAc,reserveFuel,zfw))}
+            <button onClick={()=>setBriefModal(buildBrief(legs,results,totalSavings,currency,currentAc,reserveFuel,zfw,zfwNote))}
               style={{width:"100%",background:C.panel,border:"1px solid "+C.border,borderRadius:10,padding:"13px",color:C.light,fontSize:14,fontWeight:600,cursor:"pointer"}}>
               🖨 View Brief
             </button>
@@ -5139,7 +5217,7 @@ export default function E6B(){
                   </div>
                   <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0,marginLeft:10}}>
                     <span style={{fontSize:13,fontWeight:700,color:pos?C.green:C.red}}>{pos?"+":"-"}{fM(h.totalSavings,cur.symbol)}</span>
-                    <button onClick={()=>setBriefModal(buildBrief(h.legs,h.results,h.totalSavings,cur,{name:h.aircraft},h.reserveFuel))}
+                    <button onClick={()=>setBriefModal(buildBrief(h.legs,h.results,h.totalSavings,cur,{name:h.aircraft},h.reserveFuel,h.zfw))}
                       style={{background:"transparent",border:"1px solid "+C.border,color:C.muted,padding:"3px 8px",borderRadius:5,cursor:"pointer",fontSize:11}}>Brief</button>
                   </div>
                 </div>

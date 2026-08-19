@@ -4059,7 +4059,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.63";
+const APP_VERSION = "1.64";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 
@@ -4907,6 +4907,13 @@ function tankerSnapshot(st) {
     // fuel quantities are lbs throughout; gal/L are derived
     reserveFuel: normNum(st.reserveFuel),
     zfw: normNum(st.zfw),
+    // canonical value the engine consumes
+    // How it was entered. Additive to the v2 schema: an older build ignores
+    // these and still reads `zfw`, and a file without them loads as direct entry.
+    zfwMode: st.zfwMode === "direct" ? "direct" : "split",
+    zfwBow: normNum(st.zfwBow),
+    zfwPayload: normNum(st.zfwPayload),
+    zfwDirect: normNum(st.zfwDirect),
     initialFob: normNum(st.initialFob),
     calculated: !!st.calculated,
     // Canonicalised on the way out too, so an exported file never carries a
@@ -4935,6 +4942,12 @@ function tankerSnapshotToState(data, knownAircraftIds) {
     currency: cur,
     reserveFuel: data.reserveFuel != null && data.reserveFuel !== "" ? normNum(data.reserveFuel) : "6000",
     zfw: data.zfw != null ? normNum(data.zfw) : "",
+    // A file written before the split existed carries only `zfw`; show it as a
+    // direct entry so the number the user saved is exactly what they see.
+    zfwMode: data.zfwMode === "direct" || data.zfwMode === "split" ? data.zfwMode : data.zfw != null && normNum(data.zfw) !== "" ? "direct" : "split",
+    zfwBow: data.zfwBow != null ? normNum(data.zfwBow) : "",
+    zfwPayload: data.zfwPayload != null ? normNum(data.zfwPayload) : "",
+    zfwDirect: data.zfwDirect != null ? normNum(data.zfwDirect) : data.zfw != null ? normNum(data.zfw) : "",
     initialFob: data.initialFob != null ? normNum(data.initialFob) : "",
     calculated: !!data.calculated,
     legs
@@ -5743,7 +5756,7 @@ function parseTripSheetPDF(text) {
 }
 
 // ── Brief builder ─────────────────────────────────────────────────────────
-function buildBrief(legs, results, totalSavings, currency, aircraft, reserveFuel, zfw) {
+function buildBrief(legs, results, totalSavings, currency, aircraft, reserveFuel, zfw, zfwNote) {
   const sym = currency.symbol,
     pos = totalSavings > 0;
   const route = legs.map((l, i) => i === 0 ? l.from + "→" + l.to : l.to).join("→");
@@ -5758,6 +5771,7 @@ function buildBrief(legs, results, totalSavings, currency, aircraft, reserveFuel
     currency,
     reserveFuel,
     zfw,
+    zfwNote,
     ts: new Date().toLocaleString()
   };
 }
@@ -7389,6 +7403,7 @@ function buildPrintHtml(brief) {
     aircraft,
     reserveFuel,
     zfw,
+    zfwNote,
     ts
   } = brief;
   const totalExtra = results.reduce((a, r) => a + (r?.tankerLbs || 0), 0);
@@ -7396,7 +7411,7 @@ function buildPrintHtml(brief) {
   const verdict = mustTanker ? "MUST TANKER" : pos ? "TANKER" : "NO TANKER";
   const first = results.find(Boolean) || {};
   const zfwUsed = first.zfw || toNum(zfw, 0);
-  const sum = [["Net Savings", (pos ? "+" : "−") + fM(totalSavings, sym)], ["Total Extra Fuel", totalExtra > 0 ? fL(totalExtra) + " (" + fG(totalExtra) + ")" : "none"], ["Legs", String(legs.length)], ["Reserve", fL(reserveFuel)], ["Zero Fuel Weight", zfwUsed ? fL(zfwUsed) : "—"], ["Aircraft", aircraft.name || "GV"]];
+  const sum = [["Net Savings", (pos ? "+" : "−") + fM(totalSavings, sym)], ["Total Extra Fuel", totalExtra > 0 ? fL(totalExtra) + " (" + fG(totalExtra) + ")" : "none"], ["Legs", String(legs.length)], ["Reserve", fL(reserveFuel)], ["Zero Fuel Weight", zfwUsed ? fL(zfwUsed) + (zfwNote && zfwNote !== "entered directly" ? " (" + zfwNote + ")" : "") : "—"], ["Aircraft", aircraft.name || "GV"]];
   const legHtml = legs.map((leg, i) => {
     const r = results[i];
     if (!r) return "";
@@ -15098,7 +15113,15 @@ function E6B() {
   const [calculated, setCalculated] = useState(false);
   const [editingAc, setEditingAc] = useState(null);
   const [reserveFuel, setReserveFuel] = useState("6000");
-  const [zfw, setZfw] = useState(""); // blank = fall back to aircraft BOW
+  // ZFW is the single value the engine consumes, but it is *derived* — the
+  // default entry mode is BOW + payload so nobody can quietly type an empty
+  // weight (which is lighter than BOW and would make the MLW cap dangerously
+  // optimistic). Direct entry stays available for crews reading a ZFW straight
+  // off a W&B release.
+  const [zfwMode, setZfwMode] = useState("split"); // "split" | "direct"
+  const [zfwBow, setZfwBow] = useState(""); // blank = use the aircraft profile's BOW
+  const [zfwPayload, setZfwPayload] = useState(""); // pax + cargo
+  const [zfwDirect, setZfwDirect] = useState("");
   const [initialFob, setInitialFob] = useState("");
   const [legs, setLegs] = useState([newLeg(), newLeg()]);
   const [importing, setImporting] = useState(false);
@@ -15118,6 +15141,31 @@ function E6B() {
   // initial default state would overwrite the draft before it is restored.
   const draftReadyRef = useRef(false);
   const draftTimerRef = useRef(null);
+  const currentAc = aircraftId === "gv" ? GV : profiles.find(p => p.id === aircraftId) || GV;
+  const sym = currency.symbol;
+  const acOpts = [{
+    v: "gv",
+    l: "Gulfstream V (GV)"
+  }, ...profiles.map(p => ({
+    v: p.id,
+    l: p.name
+  }))];
+
+  // Derived ZFW. In split mode it stays blank until the user actually enters
+  // something, so an untouched form keeps the conservative "fall back to BOW and
+  // warn" behaviour rather than silently claiming a zero payload.
+  const acBow = toNum(currentAc.bow, 48557);
+  const bowUsed = normNum(zfwBow) !== "" ? toNum(zfwBow, acBow) : acBow;
+  const payloadUsed = toNum(zfwPayload, 0);
+  const splitTouched = normNum(zfwBow) !== "" || normNum(zfwPayload) !== "";
+  const zfw = zfwMode === "direct" ? normNum(zfwDirect) : splitTouched ? String(bowUsed + payloadUsed) : "";
+  // How the ZFW was arrived at — echoed into the brief so it can be checked
+  // against a W&B release.
+  const zfwNote = zfwMode === "direct" ? "entered directly" : splitTouched ? "BOW " + fL(bowUsed) + " + payload " + fL(payloadUsed) : "";
+  const zfwIsAssumed = toNum(zfw, 0) <= 0 && !legs.some(l => toNum(l.payload, 0) > 0);
+  // Split mode with a BOW but no payload is still BOW-only, so it earns the same
+  // caution even though a ZFW figure now exists.
+  const zfwNoPayload = zfwMode === "split" && splitTouched && payloadUsed <= 0 && !legs.some(l => toNum(l.payload, 0) > 0);
   useEffect(() => {
     (async () => {
       const h = await recall("e6b:hist");
@@ -15132,7 +15180,10 @@ function E6B() {
         setReserveFuel(st.reserveFuel);
         setInitialFob(st.initialFob);
         setLegs(st.legs);
-        setZfw(st.zfw);
+        setZfwMode(st.zfwMode);
+        setZfwBow(st.zfwBow);
+        setZfwPayload(st.zfwPayload);
+        setZfwDirect(st.zfwDirect);
         if (st.calculated) {
           const ac = st.aircraftId === "gv" ? GV : (p || []).find(x => x.id === st.aircraftId) || GV;
           setResults(computeLegs(st.legs, st.initialFob, ac, st.reserveFuel, st.zfw));
@@ -15155,6 +15206,10 @@ function E6B() {
         currency,
         reserveFuel,
         zfw,
+        zfwMode,
+        zfwBow,
+        zfwPayload,
+        zfwDirect,
         initialFob,
         calculated,
         legs
@@ -15163,16 +15218,7 @@ function E6B() {
     return () => {
       if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
     };
-  }, [aircraftId, currency, reserveFuel, zfw, initialFob, calculated, legs]);
-  const currentAc = aircraftId === "gv" ? GV : profiles.find(p => p.id === aircraftId) || GV;
-  const sym = currency.symbol;
-  const acOpts = [{
-    v: "gv",
-    l: "Gulfstream V (GV)"
-  }, ...profiles.map(p => ({
-    v: p.id,
-    l: p.name
-  }))];
+  }, [aircraftId, currency, reserveFuel, zfw, zfwMode, zfwBow, zfwPayload, zfwDirect, initialFob, calculated, legs]);
 
   // Auto-recalculate when inputs change and results are already showing
   const calcRef = useRef(false);
@@ -15257,7 +15303,7 @@ function E6B() {
       flashTripMsg("Run a calculation first", true);
       return;
     }
-    const brief = buildBrief(legs, results, totalSavings, currency, currentAc, reserveFuel, zfw);
+    const brief = buildBrief(legs, results, totalSavings, currency, currentAc, reserveFuel, zfw, zfwNote);
     if (!printBrief(brief)) flashTripMsg("❌ Could not open the print view", true);
   }
   function exportTrip() {
@@ -15271,6 +15317,10 @@ function E6B() {
         currency,
         reserveFuel,
         zfw,
+        zfwMode,
+        zfwBow,
+        zfwPayload,
+        zfwDirect,
         initialFob,
         calculated,
         legs
@@ -15304,7 +15354,10 @@ function E6B() {
     setReserveFuel(st.reserveFuel);
     setInitialFob(st.initialFob);
     setLegs(st.legs);
-    setZfw(st.zfw);
+    setZfwMode(st.zfwMode);
+    setZfwBow(st.zfwBow);
+    setZfwPayload(st.zfwPayload);
+    setZfwDirect(st.zfwDirect);
     const ac = st.aircraftId === "gv" ? GV : profiles.find(x => x.id === st.aircraftId) || GV;
     setResults(computeLegs(st.legs, st.initialFob, ac, st.reserveFuel, st.zfw));
     setCalculated(true);
@@ -15472,7 +15525,6 @@ function E6B() {
 
   // Blank ZFW with no per-leg payload anywhere means the MLW check is running
   // against bare BOW, which is optimistic — surface that in the input.
-  const zfwIsAssumed = toNum(zfw, 0) <= 0 && !legs.some(l => toNum(l.payload, 0) > 0);
   const totalSavings = results.reduce((s, r) => s + (r?.savings || 0), 0);
   const totalExtra = results.reduce((s, r) => s + (r?.tankerLbs || 0), 0);
 
@@ -16026,30 +16078,119 @@ function E6B() {
     onChange: setReserveFuel,
     step: "100",
     fieldId: "reserve"
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 10,
-      background: C.bg,
-      borderRadius: 10,
-      border: "1.5px solid " + (zfwIsAssumed ? C.amber : C.border) + "88",
-      padding: "12px 14px"
-    }
-  }, /*#__PURE__*/React.createElement(Field, {
-    label: "Zero Fuel Weight (lbs) \u2014 BOW + payload",
-    value: zfw,
-    onChange: setZfw,
-    step: "100",
-    fieldId: "zfw",
-    color: zfwIsAssumed ? C.amber : C.accent,
-    placeholder: groupNum(String(currentAc.bow || 48557))
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: zfwIsAssumed ? C.amber : C.muted,
-      marginTop: 5,
-      lineHeight: 1.5
-    }
-  }, zfwIsAssumed ? /*#__PURE__*/React.createElement(React.Fragment, null, "\u26A0 Blank \u2014 assuming BOW ", fL(currentAc.bow || 48557), " with no payload. The Max Landing Weight check is ", /*#__PURE__*/React.createElement("b", null, "optimistic"), "; enter your actual ZFW for a real limit.") : /*#__PURE__*/React.createElement(React.Fragment, null, "MTOW ", fL(currentAc.mtow || 90500), " \xB7 MLW ", fL(currentAc.mlw || 0), " \xB7 max fuel ", fL(currentAc.maxFuel || 41300), " \u2014 fuel loads are capped to keep both takeoff and landing weight legal.")))), legs.map((leg, i) => /*#__PURE__*/React.createElement(LegCard, {
+  }), (() => {
+    const warn = zfwIsAssumed || zfwNoPayload;
+    const tabSt = on => ({
+      flex: 1,
+      padding: "7px 10px",
+      borderRadius: 7,
+      fontSize: 11.5,
+      fontWeight: 700,
+      cursor: "pointer",
+      border: "1px solid " + (on ? C.accent : C.border),
+      background: on ? C.accent + "1f" : "transparent",
+      color: on ? C.accent : C.muted
+    });
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 10,
+        background: C.bg,
+        borderRadius: 10,
+        border: "1.5px solid " + (warn ? C.amber : C.border) + "88",
+        padding: "12px 14px"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        fontWeight: 700,
+        color: warn ? C.amber : C.accent,
+        textTransform: "uppercase",
+        letterSpacing: .8
+      }
+    }, "Zero Fuel Weight (ZFW)"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: C.muted,
+        margin: "4px 0 10px",
+        lineHeight: 1.5
+      }
+    }, "BOW + passengers + cargo (everything aboard except fuel).", /*#__PURE__*/React.createElement("b", {
+      style: {
+        color: warn ? C.amber : C.sub
+      }
+    }, " NOT empty weight"), " \u2014 include crew, pax, and cargo."), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6,
+        marginBottom: 10
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setZfwMode("split"),
+      style: tabSt(zfwMode === "split")
+    }, "Build from BOW + payload"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => setZfwMode("direct"),
+      style: tabSt(zfwMode === "direct")
+    }, "Enter ZFW directly")), zfwMode === "split" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gap: 10
+      }
+    }, /*#__PURE__*/React.createElement(Field, {
+      label: "BOW (lbs)",
+      value: zfwBow,
+      onChange: setZfwBow,
+      step: "100",
+      fieldId: "zfwbow",
+      placeholder: groupNum(String(acBow))
+    }), /*#__PURE__*/React.createElement(Field, {
+      label: "Payload \u2014 pax + cargo (lbs)",
+      value: zfwPayload,
+      onChange: setZfwPayload,
+      step: "100",
+      fieldId: "zfwpay",
+      color: zfwNoPayload ? C.amber : C.accent,
+      placeholder: "0"
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 9,
+        padding: "8px 11px",
+        borderRadius: 8,
+        background: (splitTouched ? C.accent : C.muted) + "14",
+        border: "1px solid " + (splitTouched ? C.accent : C.border) + "55",
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "baseline",
+        gap: 10
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        color: C.sub
+      }
+    }, "= Zero Fuel Weight"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 15,
+        fontWeight: 800,
+        color: splitTouched ? C.text : C.muted
+      }
+    }, splitTouched ? fL(bowUsed + payloadUsed) : fL(acBow) + " (assumed)"))) : /*#__PURE__*/React.createElement(Field, {
+      label: "Zero Fuel Weight (lbs)",
+      value: zfwDirect,
+      onChange: setZfwDirect,
+      step: "100",
+      fieldId: "zfw",
+      color: zfwIsAssumed ? C.amber : C.accent,
+      placeholder: "e.g. BOW " + groupNum(String(acBow)) + " + payload"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: warn ? C.amber : C.muted,
+        marginTop: 8,
+        lineHeight: 1.5
+      }
+    }, zfwIsAssumed ? /*#__PURE__*/React.createElement(React.Fragment, null, "\u26A0 Blank \u2014 assuming BOW ", fL(acBow), " with no payload. The Max Landing Weight check is ", /*#__PURE__*/React.createElement("b", null, "optimistic"), "; enter your actual ZFW for a real limit.") : zfwNoPayload ? /*#__PURE__*/React.createElement(React.Fragment, null, "\u26A0 BOW only \u2014 no payload entered, so this ZFW is ", /*#__PURE__*/React.createElement("b", null, "optimistic"), ". Add pax and cargo for a real Max Landing Weight limit.") : /*#__PURE__*/React.createElement(React.Fragment, null, "Using ZFW ", fL(zfw), zfwNote ? " (" + zfwNote + ")" : "", " \xB7 MTOW ", fL(currentAc.mtow || 90500), " \xB7 MLW ", fL(currentAc.mlw || 0), " \xB7 max fuel ", fL(currentAc.maxFuel || 41300), ". Fuel loads are capped to keep both takeoff and landing weight legal.")));
+  })()), legs.map((leg, i) => /*#__PURE__*/React.createElement(LegCard, {
     key: i,
     leg: leg,
     legNum: i + 1,
@@ -16232,7 +16373,7 @@ function E6B() {
       fontWeight: 700
     }
   }, r.savings > 0 ? "+" : r.savings < 0 ? "-" : "", fM(r.savings, sym)))))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setBriefModal(buildBrief(legs, results, totalSavings, currency, currentAc, reserveFuel, zfw)),
+    onClick: () => setBriefModal(buildBrief(legs, results, totalSavings, currency, currentAc, reserveFuel, zfw, zfwNote)),
     style: {
       width: "100%",
       background: C.panel,
@@ -16452,7 +16593,7 @@ function E6B() {
     }, pos ? "+" : "-", fM(h.totalSavings, cur.symbol)), /*#__PURE__*/React.createElement("button", {
       onClick: () => setBriefModal(buildBrief(h.legs, h.results, h.totalSavings, cur, {
         name: h.aircraft
-      }, h.reserveFuel)),
+      }, h.reserveFuel, h.zfw)),
       style: {
         background: "transparent",
         border: "1px solid " + C.border,
