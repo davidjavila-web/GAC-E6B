@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.59";
+const APP_VERSION="1.60";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -413,6 +413,7 @@ function tankerSnapshot(st){
     units:"lbs",              // fuel quantities are lbs throughout; gal/L are derived
     globalAlt:normNum(st.globalAlt),
     reserveFuel:normNum(st.reserveFuel),
+    zfw:normNum(st.zfw),
     initialFob:normNum(st.initialFob),
     calculated:!!st.calculated,
     // Canonicalised on the way out too, so an exported file never carries a
@@ -434,6 +435,7 @@ function tankerSnapshotToState(data,knownAircraftIds){
     currency:cur,
     globalAlt:data.globalAlt!=null&&data.globalAlt!==""?normNum(data.globalAlt):"39000",
     reserveFuel:data.reserveFuel!=null&&data.reserveFuel!==""?normNum(data.reserveFuel):"6000",
+    zfw:data.zfw!=null?normNum(data.zfw):"",
     initialFob:data.initialFob!=null?normNum(data.initialFob):"",
     calculated:!!data.calculated,
     legs,
@@ -468,7 +470,7 @@ function getBurn(ac,alt){
   return toNum(ac.customBurnRate||2000);
 }
 
-function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg){
+function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg,tripZfw){
   const plannedBurn=toNum(leg.plannedBurnLbs,0);
   const alt=toNum(leg.cruiseAltFt,0)||toNum(globalAlt,0)||39000;
   const dist=toNum(leg.distNm,500);
@@ -478,10 +480,36 @@ function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg){
   const baseBurn=plannedBurn>0?plannedBurn:calcBurn;
   const reserve=toNum(reserveFuel,3000);
   const tripFuel=baseBurn+reserve;
-  const payload=toNum(leg.payload,0);
-  const bow=toNum(ac.bow,48557),zfw=bow+payload;
   const fob=toNum(fobAtDep,0);
-  const maxTOFuel=Math.min(toNum(ac.maxFuel,41300),toNum(ac.mtow,90500)-zfw);
+
+  // ── Weight envelope ────────────────────────────────────────────────────
+  // ZFW is the trip-level entry when the user has one, else BOW + this leg's
+  // payload. With neither, it is bare BOW — which understates the real ZFW and
+  // therefore makes the MLW check optimistic, so flag that via zfwAssumed.
+  const payload=toNum(leg.payload,0);
+  const bow=toNum(ac.bow,48557);
+  const zfwEntered=toNum(tripZfw,0);
+  const zfw=zfwEntered>0?zfwEntered:bow+payload;
+  const zfwAssumed=zfwEntered<=0&&payload<=0;
+  const mtow=toNum(ac.mtow,90500);
+  const mlw=toNum(ac.mlw,0);
+  const mzfw=toNum(ac.mzfw,0);
+  const tankCap=toNum(ac.maxFuel,41300);
+  // Three independent ceilings on takeoff fuel:
+  //   tanks  — takeoffFuel <= maxFuel
+  //   MTOW   — takeoffFuel <= MTOW - ZFW
+  //   MLW    — landing weight = ZFW + (takeoffFuel - enroute burn) <= MLW,
+  //            i.e. takeoffFuel <= (MLW - ZFW) + enroute burn.
+  // The MLW case uses the ENROUTE burn, not trip fuel: the reserve is still in
+  // the tanks at touchdown and counts toward landing weight. On a short leg this
+  // is by far the tightest limit, which is why full fuel was being recommended
+  // for arrivals that would land well over MLW.
+  const limTank=tankCap;
+  const limMtow=mtow-zfw;
+  const limMlw=mlw>0?(mlw-zfw)+baseBurn:Infinity;
+  const maxTOFuel=Math.min(limTank,limMtow,limMlw);
+  // Named on ties in order of operational consequence.
+  const limitBy=maxTOFuel===limMlw?"MLW":maxTOFuel===limMtow?"MTOW":"tank";
   // Fuel in the tanks at takeoff *before* any tankering decision. Fuel already on
   // board can't be offloaded, so when FOB exceeds the trip requirement the extra
   // rides along and IS the baseline — tankering adds on top of that, not on top of
@@ -514,7 +542,10 @@ function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg){
     const netPerLb=priceDiff-breakEven;
     if(netPerLb>0||arrRampFee>0||depRampFee>0){
       let bestSavings=-Infinity,bestLbs=0;
-      for(let tl=0;tl<=maxExtra;tl+=200){
+      const steps=[];
+      for(let tl=0;tl<=maxExtra;tl+=200)steps.push(tl);
+      if(steps[steps.length-1]<maxExtra-1e-9)steps.push(maxExtra);
+      for(const tl of steps){
         const pen=tl*penFactor*hrs;
         // Arrival ramp fee: if tankering means we buy less at destination than the waiver threshold
         const arrivalFob=Math.max(0,baseTakeoffFuel+tl-baseBurn);
@@ -549,33 +580,47 @@ function calcLeg(ac,leg,globalAlt,reserveFuel,fobAtDep,nextLeg){
     }
   }
 
-  const mtow=toNum(ac.mtow,90500);
-  const takeoffWt=zfw+baseTakeoffFuel+tankerLbs;
-  if(tankerLbs>0&&takeoffWt>mtow){
-    const ex=Math.round(takeoffWt-mtow);
-    tankerLbs=Math.max(0,tankerLbs-ex);
-    weightWarning=`MTOW limit — tanker reduced by ${fL(ex)}`;
-  }
   // Single source of truth for every "load" figure the UI shows, so the decision
   // badge ("LOAD x lbs") and the breakdown ("Fuel to load") can never disagree.
+  // tankerLbs is already bounded by maxExtra, so takeoffFuel is inside the
+  // envelope by construction — no post-hoc trimming.
   const takeoffFuel=baseTakeoffFuel+tankerLbs;
   const fuelToLoad=Math.max(0,takeoffFuel-fob);
+  const takeoffWt=zfw+takeoffFuel;
+  const landingFuel=Math.max(0,takeoffFuel-baseBurn);
+  const landingWt=zfw+landingFuel;
+  const overMtow=Math.max(0,takeoffWt-mtow);
+  const overMlw=mlw>0?Math.max(0,landingWt-mlw):0;
+  const overMzfw=mzfw>0?Math.max(0,zfw-mzfw):0;
+  // The optimiser can't fix these — they mean the leg is over-limit before any
+  // tankering, e.g. fuel already on board that would have to be defuelled.
+  const warnings=[];
+  if(overMzfw>0.5)warnings.push(`ZFW ${fL(zfw)} exceeds MZFW ${fL(mzfw)} by ${fL(overMzfw)}`);
+  if(overMtow>0.5)warnings.push(`Takeoff weight ${fL(takeoffWt)} exceeds MTOW ${fL(mtow)} by ${fL(overMtow)}`);
+  if(overMlw>0.5)warnings.push(`Landing weight ${fL(landingWt)} exceeds MLW ${fL(mlw)} by ${fL(overMlw)} — offload before departure`);
+  if(warnings.length)weightWarning=warnings.join(" · ");
+  const tankerCapped=tankerLbs>0&&maxExtra>0&&tankerLbs>=maxExtra-1e-6;
+  const capLabel=limitBy==="MLW"?`Max Landing Weight (MLW ${fL(mlw)})`
+    :limitBy==="MTOW"?`Max Takeoff Weight (MTOW ${fL(mtow)})`:`tank capacity (${fL(tankCap)})`;
+  const capNote=tankerCapped?`Tanker capped by ${capLabel} — max takeoff fuel ${fL(maxTOFuel)}`:"";
   const depRampWaived=depRampFee>0&&depMinPurLbs>0&&fuelToLoad>=depMinPurLbs;
   const depRampOwed=depRampFee>0&&!depRampWaived;
-  return{decision,tankerLbs,savings,weightWarning,note,hrs,baseBurn,tripFuel,arrRampFee,depRampFee,depRampWaived,depRampOwed,maxExtra,zfw,fob,fobCoversTrip,takeoffFuel,fuelToLoad,arrivalFob:Math.max(0,takeoffFuel-baseBurn),depP,arrP,priceDiff,breakEven,penFactor};
+  return{decision,tankerLbs,savings,weightWarning,note,hrs,baseBurn,tripFuel,arrRampFee,depRampFee,depRampWaived,depRampOwed,maxExtra,zfw,zfwAssumed,fob,fobCoversTrip,takeoffFuel,fuelToLoad,arrivalFob:Math.max(0,takeoffFuel-baseBurn),depP,arrP,priceDiff,breakEven,penFactor,
+    mtow,mlw,mzfw,tankCap,limTank,limMtow,limMlw,maxTOFuel,limitBy,tankerCapped,capLabel,capNote,
+    takeoffWt,landingFuel,landingWt,overMtow,overMlw,overMzfw};
 }
 
 
 // Walk the leg chain, carrying arrival fuel forward into the next departure.
 // Shared by the auto-recalc effect, the Calculate button and trip import so all
 // three can never drift apart.
-function computeLegs(legsArr,fobAtStart,ac,globalAlt,reserveFuel){
+function computeLegs(legsArr,fobAtStart,ac,globalAlt,reserveFuel,tripZfw){
   const res=[];
   let chainedFob=toNum(fobAtStart,0);
   for(let i=0;i<legsArr.length;i++){
     const leg=legsArr[i];
     const fobForLeg=i===0?toNum(fobAtStart,0):(leg.useOverride?toNum(leg.fobOverride,0):chainedFob);
-    const r=calcLeg(ac,leg,globalAlt,reserveFuel,fobForLeg,legsArr[i+1]||null);
+    const r=calcLeg(ac,leg,globalAlt,reserveFuel,fobForLeg,legsArr[i+1]||null,tripZfw);
     res.push(r);chainedFob=r.arrivalFob;
   }
   return res;
@@ -1176,6 +1221,24 @@ function DecisionBadge({r,sym,from,to}){
         </div>}
       </>;})()}
 
+      {/* Weight envelope — the limits that cap the fuel load. */}
+      {r.landingWt>0&&(()=>{
+        const mlwOk=!r.mlw||r.landingWt<=r.mlw+0.5;
+        const mtowOk=!r.mtow||r.takeoffWt<=r.mtow+0.5;
+        return<div style={{background:C.bg,borderRadius:8,padding:"9px 11px",marginTop:4,marginBottom:10,border:"1px solid "+C.border}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,fontSize:11}}>
+            <div style={{color:C.sub}}>Takeoff weight <b style={{color:mtowOk?C.text:C.red}}>{fL(r.takeoffWt)}</b>
+              <span style={{color:C.muted}}> / MTOW {fL(r.mtow)}</span> {mtowOk?"✓":"✗"}</div>
+            {r.mlw>0&&<div style={{color:C.sub}}>Landing weight <b style={{color:mlwOk?C.text:C.red}}>{fL(r.landingWt)}</b>
+              <span style={{color:C.muted}}> / MLW {fL(r.mlw)}</span> {mlwOk?"✓":"✗"}</div>}
+          </div>
+          <div style={{fontSize:10,color:C.muted,marginTop:5}}>
+            ZFW {fL(r.zfw)}{r.zfwAssumed?" (BOW only — MLW check optimistic)":""} · max takeoff fuel {fL(r.maxTOFuel)} ({r.limitBy==="tank"?"tank capacity":r.limitBy})
+          </div>
+          {r.capNote&&<div style={{fontSize:11,color:C.gold,fontWeight:600,marginTop:5}}>⚠ {r.capNote}</div>}
+        </div>;
+      })()}
+
       {/* Departure ramp fee status */}
       {r.depRampFee>0&&<div style={{background:(r.depRampWaived?C.green:C.gold)+"15",border:"1px solid "+(r.depRampWaived?C.green:C.gold)+"33",borderRadius:8,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4,marginBottom:10}}>
         <span style={{fontSize:12,color:C.sub}}>Dep ramp fee at {from}{r.depRampWaived?" (waived)":""}</span>
@@ -1463,6 +1526,15 @@ function BriefModal({brief,onClose}){
     if(r.baseBurn>0) mathRows.push({l:"Planned fuel burn",v:fL(r.baseBurn)});
     mathRows.push({l:"Trip fuel required (incl. reserve)",v:fL(r.tripFuel)});
     if(r.fob>0) mathRows.push({l:"Fuel on board at departure",v:fL(r.fob)});
+    if(r.zfw>0) mathRows.push({l:"Zero fuel weight (ZFW)",v:fL(r.zfw)+(r.zfwAssumed?"  (BOW only — no payload entered)":"")});
+    if(r.maxTOFuel!=null){
+      const lim=[];
+      if(r.limTank!=null) lim.push({l:"Limit — tank capacity",v:fL(r.limTank)});
+      if(r.limMtow!=null) lim.push({l:"Limit — MTOW "+fL(r.mtow)+" − ZFW",v:fL(r.limMtow)});
+      if(r.mlw>0&&Number.isFinite(r.limMlw)) lim.push({l:"Limit — (MLW "+fL(r.mlw)+" − ZFW) + enroute burn "+fL(r.baseBurn),v:fL(r.limMlw)});
+      lim.forEach(x=>mathRows.push(x));
+      mathRows.push({l:"Max takeoff fuel (binding limit: "+(r.limitBy==="tank"?"tank capacity":r.limitBy)+")",v:fL(r.maxTOFuel),highlight:true,color:C.gold});
+    }
     if(r.maxExtra>0) mathRows.push({l:"Max additional fuel possible",v:fL(r.maxExtra)});
     if(hrs>0&&pen>0&&depP>0) mathRows.push({l:"Burn penalty factor",v:(pen*100).toFixed(1)+"% per hr  =  "+sym+(pen*depP).toFixed(3)+"/lb/hr"});
     if(be>0) mathRows.push({l:"Break-even price diff needed",v:sym+be.toFixed(3)+"/lb over "+hrs.toFixed(2)+" hrs"});
@@ -1477,6 +1549,8 @@ function BriefModal({brief,onClose}){
     }
     if(r.depRampFee>0) mathRows.push({l:"Dep ramp fee at "+leg.from,v:sym+toNum(r.depRampFee).toFixed(0)+(r.depRampWaived?" (waived by fuel purchase)":" (payable)")});
     if(r.savings!==0) mathRows.push({l:"Net savings / cost",v:(r.savings>0?"+":"")+sym+r.savings.toFixed(2),highlight:true,color:r.savings>0?C.green:C.red});
+    if(r.takeoffWt>0) mathRows.push({l:"Takeoff weight (ZFW + takeoff fuel)",v:fL(r.takeoffWt)+" / MTOW "+fL(r.mtow)+(r.overMtow>0.5?"  ✗ OVER by "+fL(r.overMtow):"  ✓"),color:r.overMtow>0.5?C.red:undefined});
+    if(r.mlw>0) mathRows.push({l:"Landing weight (ZFW + takeoff fuel − enroute burn)",v:fL(r.landingWt)+" / MLW "+fL(r.mlw)+(r.overMlw>0.5?"  ✗ OVER by "+fL(r.overMlw):"  ✓"),highlight:true,color:r.overMlw>0.5?C.red:C.green});
     if(r.arrivalFob>0) mathRows.push({l:"Arrival FOB",v:fL(r.arrivalFob)+" → carried to next leg"});
 
     // Build narrative
@@ -1511,6 +1585,13 @@ function BriefModal({brief,onClose}){
         narrative.push("Load trip fuel only at "+leg.from+". Refuel at "+leg.to+" on arrival.");
       }
     }
+
+    // Weight envelope always gets the last word — it is the constraint a crew
+    // acts on, and it can override an otherwise-attractive tankering case.
+    if(r.capNote)narrative.push(r.capNote+". Landing weight "+fL(r.landingWt)+" against MLW "+fL(r.mlw)+".");
+    if(r.overMlw>0.5)narrative.push("⚠ Landing weight "+fL(r.landingWt)+" exceeds MLW "+fL(r.mlw)+" by "+fL(r.overMlw)+" even without tankering — fuel must be offloaded at "+leg.from+" or burned off before landing.");
+    if(r.overMtow>0.5)narrative.push("⚠ Takeoff weight "+fL(r.takeoffWt)+" exceeds MTOW "+fL(r.mtow)+" by "+fL(r.overMtow)+".");
+    if(r.zfwAssumed)narrative.push("No ZFW or payload was entered, so these weights assume the aircraft's basic operating weight of "+fL(r.zfw)+" with nothing on board. The MLW limit shown is therefore optimistic — enter the trip's actual ZFW for a real number.");
 
     return{action,icon,bg,lc,mathRows,narrative};
   }
@@ -4365,6 +4446,7 @@ export default function E6B(){
   const[editingAc,setEditingAc]=useState(null);
   const[globalAlt,setGlobalAlt]=useState("39000");
   const[reserveFuel,setReserveFuel]=useState("6000");
+  const[zfw,setZfw]=useState("");   // blank = fall back to aircraft BOW
   const[initialFob,setInitialFob]=useState("");
   const[legs,setLegs]=useState([newLeg(),newLeg()]);
   const[importing,setImporting]=useState(false);
@@ -4393,10 +4475,10 @@ export default function E6B(){
       const st=tankerSnapshotToState(draft,(p||[]).map(x=>x.id));
       setAircraftId(st.aircraftId);setCurrency(st.currency);
       setGlobalAlt(st.globalAlt);setReserveFuel(st.reserveFuel);
-      setInitialFob(st.initialFob);setLegs(st.legs);
+      setInitialFob(st.initialFob);setLegs(st.legs);setZfw(st.zfw);
       if(st.calculated){
         const ac=st.aircraftId==="gv"?GV:(p||[]).find(x=>x.id===st.aircraftId)||GV;
-        setResults(computeLegs(st.legs,st.initialFob,ac,st.globalAlt,st.reserveFuel));
+        setResults(computeLegs(st.legs,st.initialFob,ac,st.globalAlt,st.reserveFuel,st.zfw));
         setCalculated(true);calcRef.current=true;
       }
     }
@@ -4409,10 +4491,10 @@ export default function E6B(){
     if(!draftReadyRef.current)return;
     if(draftTimerRef.current)clearTimeout(draftTimerRef.current);
     draftTimerRef.current=setTimeout(()=>{
-      store(TANKER_DRAFT_KEY,tankerSnapshot({aircraftId,currency,globalAlt,reserveFuel,initialFob,calculated,legs}));
+      store(TANKER_DRAFT_KEY,tankerSnapshot({aircraftId,currency,globalAlt,reserveFuel,zfw,initialFob,calculated,legs}));
     },500);
     return()=>{if(draftTimerRef.current)clearTimeout(draftTimerRef.current);};
-  },[aircraftId,currency,globalAlt,reserveFuel,initialFob,calculated,legs]);
+  },[aircraftId,currency,globalAlt,reserveFuel,zfw,initialFob,calculated,legs]);
 
   const currentAc=aircraftId==="gv"?GV:profiles.find(p=>p.id===aircraftId)||GV;
   const sym=currency.symbol;
@@ -4422,8 +4504,8 @@ export default function E6B(){
   const calcRef=useRef(false);
   useEffect(()=>{
     if(!calcRef.current)return;
-    setResults(computeLegs(legs,initialFob,currentAc,globalAlt,reserveFuel));
-  },[initialFob,aircraftId,globalAlt,reserveFuel,currency.code]);
+    setResults(computeLegs(legs,initialFob,currentAc,globalAlt,reserveFuel,zfw));
+  },[initialFob,aircraftId,globalAlt,reserveFuel,zfw,currency.code]);
   function addLeg(){const lastTo=legs[legs.length-1]?.to||"";setLegs(ls=>[...ls,newLeg(lastTo)]);setCalculated(false);calcRef.current=false;}
   function removeLeg(i){setLegs(ls=>ls.filter((_,j)=>j!==i));setCalculated(false);calcRef.current=false;}
 
@@ -4451,10 +4533,10 @@ export default function E6B(){
   }
 
   function runCalc(){
-    const res=computeLegs(legs,initialFob,currentAc,globalAlt,reserveFuel);
+    const res=computeLegs(legs,initialFob,currentAc,globalAlt,reserveFuel,zfw);
     setResults(res);setCalculated(true);calcRef.current=true;
     const totalSavings=res.reduce((s,r)=>s+(r?.savings||0),0);
-    const entry={id:Date.now(),legs,results:res,totalSavings,aircraft:currentAc.name,currency:currency.code,globalAlt,reserveFuel,ts:new Date().toISOString()};
+    const entry={id:Date.now(),legs,results:res,totalSavings,aircraft:currentAc.name,currency:currency.code,globalAlt,reserveFuel,zfw,ts:new Date().toISOString()};
     const nh=[entry,...history].slice(0,30);setHistory(nh);store("e6b:hist",nh);
   }
 
@@ -4467,7 +4549,7 @@ export default function E6B(){
   function exportTrip(){
     const payload={app:"E6B",type:TANKER_FILE_TYPE,version:TANKER_FILE_VERSION,
       savedAt:new Date().toISOString(),
-      data:tankerSnapshot({aircraftId,currency,globalAlt,reserveFuel,initialFob,calculated,legs})};
+      data:tankerSnapshot({aircraftId,currency,globalAlt,reserveFuel,zfw,initialFob,calculated,legs})};
     // The download itself is the confirmation; only surface a message if it failed.
     if(!downloadJson(tankerFileName(legs),payload))flashTripMsg("❌ Could not create the download",true);
   }
@@ -4490,9 +4572,9 @@ export default function E6B(){
     if(!st.legs.length){flashTripMsg("❌ Not a valid E6B tanker trip file",true);return;}
     setAircraftId(st.aircraftId);setCurrency(st.currency);
     setGlobalAlt(st.globalAlt);setReserveFuel(st.reserveFuel);
-    setInitialFob(st.initialFob);setLegs(st.legs);
+    setInitialFob(st.initialFob);setLegs(st.legs);setZfw(st.zfw);
     const ac=st.aircraftId==="gv"?GV:profiles.find(x=>x.id===st.aircraftId)||GV;
-    setResults(computeLegs(st.legs,st.initialFob,ac,st.globalAlt,st.reserveFuel));
+    setResults(computeLegs(st.legs,st.initialFob,ac,st.globalAlt,st.reserveFuel,st.zfw));
     setCalculated(true);calcRef.current=true;
     // Persist immediately rather than waiting out the debounce, so the imported
     // trip survives a reload even if the user closes the tab straight away.
@@ -4586,6 +4668,9 @@ export default function E6B(){
   }
   async function deleteProfile(id){const np=profiles.filter(p=>p.id!==id);setProfiles(np);await store("e6b:profiles",np);if(aircraftId===id)setAircraftId("gv");}
 
+  // Blank ZFW with no per-leg payload anywhere means the MLW check is running
+  // against bare BOW, which is optimistic — surface that in the input.
+  const zfwIsAssumed=toNum(zfw,0)<=0&&!legs.some(l=>toNum(l.payload,0)>0);
   const totalSavings=results.reduce((s,r)=>s+(r?.savings||0),0);
   const totalExtra=results.reduce((s,r)=>s+(r?.tankerLbs||0),0);
 
@@ -4743,6 +4828,17 @@ export default function E6B(){
                 <label style={{...LS,color:C.sub}}>Reserve Fuel (lbs)</label>
                 <input type="number" value={reserveFuel} onChange={e=>{setReserveFuel(e.target.value);}}
                   style={{width:"100%",background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
+              </div>
+            </div>
+            {/* ZFW drives the MTOW and MLW ceilings on how much fuel can legally be loaded. */}
+            <div style={{marginTop:10,background:C.bg,borderRadius:10,border:"1.5px solid "+(zfwIsAssumed?C.amber:C.border)+"88",padding:"12px 14px"}}>
+              <label style={{...LS,color:zfwIsAssumed?C.amber:C.sub}}>Zero Fuel Weight (lbs) — BOW + payload</label>
+              <input type="number" value={zfw} onChange={e=>{setZfw(e.target.value);}} placeholder={String(currentAc.bow||48557)}
+                style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
+              <div style={{fontSize:11,color:zfwIsAssumed?C.amber:C.muted,marginTop:5,lineHeight:1.5}}>
+                {zfwIsAssumed
+                  ?<>⚠ Blank — assuming BOW {fL(currentAc.bow||48557)} with no payload. The Max Landing Weight check is <b>optimistic</b>; enter your actual ZFW for a real limit.</>
+                  :<>MTOW {fL(currentAc.mtow||90500)} · MLW {fL(currentAc.mlw||0)} · max fuel {fL(currentAc.maxFuel||41300)} — fuel loads are capped to keep both takeoff and landing weight legal.</>}
               </div>
             </div>
           </div>
