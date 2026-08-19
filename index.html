@@ -4059,7 +4059,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.61";
+const APP_VERSION = "1.62";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 
@@ -5743,7 +5743,7 @@ function parseTripSheetPDF(text) {
 }
 
 // ── Brief builder ─────────────────────────────────────────────────────────
-function buildBrief(legs, results, totalSavings, currency, aircraft, reserveFuel) {
+function buildBrief(legs, results, totalSavings, currency, aircraft, reserveFuel, zfw) {
   const sym = currency.symbol,
     pos = totalSavings > 0;
   const route = legs.map((l, i) => i === 0 ? l.from + "→" + l.to : l.to).join("→");
@@ -5757,6 +5757,7 @@ function buildBrief(legs, results, totalSavings, currency, aircraft, reserveFuel
     aircraft,
     currency,
     reserveFuel,
+    zfw,
     ts: new Date().toLocaleString()
   };
 }
@@ -7114,6 +7115,371 @@ function AircraftForm({
   }, "Cancel")));
 }
 
+// Builds the per-leg brief content: the decision line, the figure rows and the
+// plain-English analysis. Module-level so the on-screen brief and the printable
+// PDF view render from exactly the same source.
+function legExplanation(leg, r, i, sym, reserveFuel) {
+  const depP = toNum(r.depP || 0),
+    arrP = toNum(r.arrP || 0);
+  const diff = toNum(r.priceDiff || 0);
+  const be = toNum(r.breakEven || 0);
+  const hrs = toNum(r.hrs || 0);
+  const pen = toNum(r.penFactor || 0.04);
+  const isTanker = r.decision === "TANKER" || r.decision === "MUST TANKER";
+  const lc = LEG_COLORS[i % LEG_COLORS.length];
+  let action = "";
+  const uplift = r.fuelToLoad != null ? r.fuelToLoad : Math.max(0, (r.tripFuel || 0) + (r.tankerLbs || 0) - (r.fob || 0));
+  if (isTanker) action = "LOAD " + fL(uplift) + " (" + fG(uplift) + ") at " + leg.from + (uplift > r.tankerLbs ? " — incl. " + fL(r.tankerLbs) + " tankered" : "");else if (r.decision === "NO PURCHASE") action = "NO FUEL at " + leg.from + " — current FOB covers this leg";else if (r.fobCoversTrip) action = "NO FUEL at " + leg.from + " — depart with current FOB";else if (r.arrRampFee > 0) action = "TRIP FUEL ONLY at " + leg.from + " — cheaper to refuel at " + leg.to;else action = "TRIP FUEL ONLY at " + leg.from + " — cheaper to refuel at " + leg.to;
+  const isNoFuelB = r.decision === "NO PURCHASE" || r.fobCoversTrip;
+  const icon = isTanker ? "✅" : isNoFuelB ? "❌" : "⛽";
+  const bg = isTanker ? C.green : isNoFuelB ? C.red : C.gold;
+
+  // Build math rows
+  const mathRows = [];
+  if (depP > 0) mathRows.push({
+    l: "Fuel price at " + leg.from,
+    v: sym + depP.toFixed(3) + "/lb  ≈" + sym + (depP * 6.7).toFixed(2) + "/gal"
+  });
+  if (arrP > 0) mathRows.push({
+    l: "Fuel price at " + leg.to,
+    v: sym + arrP.toFixed(3) + "/lb  ≈" + sym + (arrP * 6.7).toFixed(2) + "/gal"
+  });
+  if (depP > 0 && arrP > 0) mathRows.push({
+    l: "Price difference",
+    v: (diff < 0 ? "−" : "+") + sym + Math.abs(diff).toFixed(3) + "/lb  " + (diff > 0 ? "cheaper at " + leg.from : "cheaper at " + leg.to)
+  });
+  if (hrs > 0) mathRows.push({
+    l: "Estimated flight time",
+    v: hrs.toFixed(2) + " hrs"
+  });
+  if (r.baseBurn > 0) mathRows.push({
+    l: "Planned fuel burn",
+    v: fL(r.baseBurn)
+  });
+  mathRows.push({
+    l: "Trip fuel required (incl. reserve)",
+    v: fL(r.tripFuel)
+  });
+  if (r.fob > 0) mathRows.push({
+    l: "Fuel on board at departure",
+    v: fL(r.fob)
+  });
+  if (r.zfw > 0) mathRows.push({
+    l: "Zero fuel weight (ZFW)",
+    v: fL(r.zfw) + (r.zfwAssumed ? "  (BOW only — no payload entered)" : "")
+  });
+  if (r.maxTOFuel != null) {
+    const lim = [];
+    if (r.limTank != null) lim.push({
+      l: "Limit — tank capacity",
+      v: fL(r.limTank)
+    });
+    if (r.limMtow != null) lim.push({
+      l: "Limit — MTOW " + fL(r.mtow) + " − ZFW",
+      v: fL(r.limMtow)
+    });
+    if (r.mlw > 0 && Number.isFinite(r.limMlw)) lim.push({
+      l: "Limit — (MLW " + fL(r.mlw) + " − ZFW) + enroute burn " + fL(r.baseBurn),
+      v: fL(r.limMlw)
+    });
+    lim.forEach(x => mathRows.push(x));
+    mathRows.push({
+      l: "Max takeoff fuel (binding limit: " + (r.limitBy === "tank" ? "tank capacity" : r.limitBy) + ")",
+      v: fL(r.maxTOFuel),
+      highlight: true,
+      color: C.gold
+    });
+  }
+  if (r.maxExtra > 0) mathRows.push({
+    l: "Max additional fuel possible",
+    v: fL(r.maxExtra)
+  });
+  if (hrs > 0 && pen > 0 && depP > 0) mathRows.push({
+    l: "Burn penalty factor",
+    v: (pen * 100).toFixed(1) + "% per hr  =  " + sym + (pen * depP).toFixed(3) + "/lb/hr"
+  });
+  if (be > 0) mathRows.push({
+    l: "Break-even price diff needed",
+    v: sym + be.toFixed(3) + "/lb over " + hrs.toFixed(2) + " hrs"
+  });
+  if (r.tankerLbs > 0) {
+    const takeoffFuel = r.takeoffFuel != null ? r.takeoffFuel : r.tripFuel + r.tankerLbs;
+    const fuelToLoad = r.fuelToLoad != null ? r.fuelToLoad : Math.max(0, takeoffFuel - r.fob);
+    mathRows.push({
+      l: "Takeoff fuel (trip + extra)",
+      v: fL(takeoffFuel)
+    });
+    mathRows.push({
+      l: "Fuel to load",
+      v: fL(fuelToLoad) + "  (" + fG(fuelToLoad) + ")  (" + fLt(fuelToLoad) + ")",
+      highlight: true,
+      color: C.green
+    });
+    mathRows.push({
+      l: "Of which extra tankering",
+      v: fL(r.tankerLbs) + "  (" + fG(r.tankerLbs) + ")"
+    });
+    if (depP > 0) mathRows.push({
+      l: "Cost to purchase extra fuel",
+      v: fM(r.tankerLbs * depP, sym) + " at " + leg.from
+    });
+    if (arrP > 0) mathRows.push({
+      l: "Cost if bought at destination",
+      v: fM(r.tankerLbs * arrP, sym) + " at " + leg.to
+    });
+  }
+  if (r.depRampFee > 0) mathRows.push({
+    l: "Dep ramp fee at " + leg.from,
+    v: sym + toNum(r.depRampFee).toFixed(0) + (r.depRampWaived ? " (waived by fuel purchase)" : " (payable)")
+  });
+  if (r.savings !== 0) mathRows.push({
+    l: "Net savings / cost",
+    v: (r.savings < 0 ? "−" : "+") + fM(r.savings, sym),
+    highlight: true,
+    color: r.savings > 0 ? C.green : C.red
+  });
+  if (r.takeoffWt > 0) mathRows.push({
+    l: "Takeoff weight (ZFW + takeoff fuel)",
+    v: fL(r.takeoffWt) + " / MTOW " + fL(r.mtow) + (r.overMtow > 0.5 ? "  ✗ OVER by " + fL(r.overMtow) : "  ✓"),
+    color: r.overMtow > 0.5 ? C.red : undefined
+  });
+  if (r.mlw > 0) mathRows.push({
+    l: "Landing weight (ZFW + takeoff fuel − enroute burn)",
+    v: fL(r.landingWt) + " / MLW " + fL(r.mlw) + (r.overMlw > 0.5 ? "  ✗ OVER by " + fL(r.overMlw) : "  ✓"),
+    highlight: true,
+    color: r.overMlw > 0.5 ? C.red : C.green
+  });
+  if (r.arrivalFob > 0) mathRows.push({
+    l: "Arrival FOB",
+    v: fL(r.arrivalFob) + " → carried to next leg"
+  });
+
+  // Build narrative
+  const narrative = [];
+  if (r.decision === "MUST TANKER") {
+    narrative.push("No fuel available at " + leg.to + ". You must carry all fuel needed for this leg from " + leg.from + ".");
+  } else if (r.decision === "NO PURCHASE") {
+    narrative.push("Current fuel on board (" + fL(r.fob) + ") fully covers the trip fuel requirement of " + fL(r.tripFuel) + " including the " + fL(toNum(reserveFuel)) + " reserve. No purchase is needed or beneficial at this stop.");
+  } else if (isTanker) {
+    if (diff > 0) {
+      narrative.push("Fuel is " + sym + diff.toFixed(3) + "/lb cheaper at " + leg.from + " than " + leg.to + ". After accounting for the burn penalty of " + sym + (pen * depP).toFixed(3) + "/lb per hour over " + hrs.toFixed(2) + " hours (break-even: " + sym + be.toFixed(3) + "/lb), the price advantage of " + sym + diff.toFixed(3) + "/lb still exceeds the cost of carrying the fuel.");
+    }
+    if (r.depRampFee > 0 && r.depRampWaived) {
+      narrative.push("The " + sym + toNum(r.depRampFee).toFixed(0) + " departure ramp fee at " + leg.from + " is waived by the fuel purchase.");
+    }
+    narrative.push("Net result: loading " + fL(r.tankerLbs) + " at " + leg.from + " saves " + fM(r.savings, sym) + " compared to buying at " + leg.to + ".");
+  } else {
+    // NO TANKER
+    if (r.fobCoversTrip) {
+      narrative.push("Current FOB (" + fL(r.fob) + ") already covers trip fuel (" + fL(r.tripFuel) + "). No additional fuel purchase needed at " + leg.from + ".");
+    } else if (diff <= 0) {
+      narrative.push("Fuel at " + leg.to + " (" + sym + arrP.toFixed(3) + "/lb) is cheaper than " + leg.from + " (" + sym + depP.toFixed(3) + "/lb). Load trip fuel only — no extra.");
+    } else if (diff > 0 && diff <= be) {
+      narrative.push("Although fuel is " + sym + diff.toFixed(3) + "/lb cheaper at " + leg.from + ", the burn penalty of " + sym + (pen * depP).toFixed(3) + "/lb per hour over " + hrs.toFixed(2) + " hours requires a price difference of at least " + sym + be.toFixed(3) + "/lb to break even. Carrying extra fuel would cost more than it saves.");
+    }
+    if (r.depRampFee > 0 && r.depRampOwed) {
+      narrative.push("A departure ramp fee of " + sym + toNum(r.depRampFee).toFixed(0) + " applies at " + leg.from + ".");
+    }
+    if (r.fobCoversTrip) {
+      narrative.push("Depart " + leg.from + " with current fuel. No purchase needed.");
+    } else {
+      narrative.push("Load trip fuel only at " + leg.from + ". Refuel at " + leg.to + " on arrival.");
+    }
+  }
+
+  // Weight envelope always gets the last word — it is the constraint a crew
+  // acts on, and it can override an otherwise-attractive tankering case.
+  if (r.capNote) narrative.push(r.capNote + ". Landing weight " + fL(r.landingWt) + " against MLW " + fL(r.mlw) + ".");
+  if (r.overMlw > 0.5) narrative.push("⚠ Landing weight " + fL(r.landingWt) + " exceeds MLW " + fL(r.mlw) + " by " + fL(r.overMlw) + " even without tankering — fuel must be offloaded at " + leg.from + " or burned off before landing.");
+  if (r.overMtow > 0.5) narrative.push("⚠ Takeoff weight " + fL(r.takeoffWt) + " exceeds MTOW " + fL(r.mtow) + " by " + fL(r.overMtow) + ".");
+  if (r.zfwAssumed) narrative.push("No ZFW or payload was entered, so these weights assume the aircraft's basic operating weight of " + fL(r.zfw) + " with nothing on board. The MLW limit shown is therefore optimistic — enter the trip's actual ZFW for a real number.");
+  return {
+    action,
+    icon,
+    bg,
+    lc,
+    mathRows,
+    narrative
+  };
+}
+
+// ── Printable brief → PDF ─────────────────────────────────────────────────
+// window.print() against an @media print stylesheet rather than a PDF library:
+// it is the one path that reliably reaches "Save as PDF" from the iOS Safari
+// share sheet, and it needs no extra CDN dependency. The printable markup is
+// appended to <body> (outside #root) and the stylesheet hides #root for print,
+// so none of the app chrome — nav tabs, buttons, inputs — reaches the page.
+const PRINT_HOST_ID = "e6b-print";
+const PRINT_STYLE_ID = "e6b-print-style";
+const PRINT_CSS = `
+#${PRINT_HOST_ID}{display:none}
+@media print{
+  html,body{background:#fff!important;margin:0!important;padding:0!important;height:auto!important}
+  #root{display:none!important}
+  #${PRINT_HOST_ID}{display:block!important}
+  @page{size:auto;margin:13mm}
+}
+#${PRINT_HOST_ID}{color:#000;background:#fff;font:11pt/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  -webkit-print-color-adjust:exact;print-color-adjust:exact}
+#${PRINT_HOST_ID} h1,#${PRINT_HOST_ID} h2,#${PRINT_HOST_ID} h3,#${PRINT_HOST_ID} p,#${PRINT_HOST_ID} dl,#${PRINT_HOST_ID} dd,#${PRINT_HOST_ID} table{margin:0}
+.pb-hd{border-bottom:2.5px solid #000;padding-bottom:8px;margin-bottom:12px}
+.pb-hd h1{font-size:17pt;letter-spacing:1.2px;font-weight:800}
+.pb-route{font-size:13pt;font-weight:700;margin-top:5px;letter-spacing:.4px}
+.pb-meta{font-size:9pt;color:#444;margin-top:3px}
+.pb-verdict{display:inline-block;margin-top:8px;padding:4px 12px;border:2px solid #000;
+  font-size:12pt;font-weight:800;letter-spacing:1.4px}
+.pb-verdict.neg{border-style:double;border-width:4px}
+.pb-sec{margin-bottom:13px;break-inside:avoid;page-break-inside:avoid}
+.pb-sec h2,.pb-leg h2{font-size:10pt;letter-spacing:1.3px;text-transform:uppercase;border-bottom:1px solid #000;
+  padding-bottom:3px;margin-bottom:6px;font-weight:800}
+.pb-sum{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:5px}
+.pb-sum div{border:1px solid #999;padding:5px 8px}
+.pb-sum dt{font-size:7.5pt;letter-spacing:.7px;text-transform:uppercase;color:#444}
+.pb-sum dd{font-size:11.5pt;font-weight:700;margin:1px 0 0;font-variant-numeric:tabular-nums}
+.pb-note{font-size:8.5pt;color:#333;font-style:italic;margin-top:4px!important}
+.pb-leg{margin-bottom:14px;break-inside:avoid;page-break-inside:avoid}
+.pb-leg h2{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.pb-leg-sub{font-size:8.5pt;color:#444;font-weight:400;letter-spacing:.2px;text-transform:none}
+.pb-dec{border:1.5px solid #000;background:#f2f2f2;padding:5px 9px;font-size:11pt;font-weight:800;margin-bottom:6px}
+.pb-fig{width:100%;border-collapse:collapse;font-size:8.8pt;font-variant-numeric:tabular-nums}
+.pb-fig td{padding:1.6px 0;vertical-align:top;border-bottom:1px dotted #ccc}
+.pb-fig td.k{color:#333;padding-right:10px}
+.pb-fig td.v{text-align:right;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.pb-fig tr.hi td{font-weight:800;border-bottom:1px solid #000}
+.pb-wt{border:1.5px solid #000;padding:5px 9px;margin-top:6px;font-size:9pt;font-variant-numeric:tabular-nums}
+.pb-wt b{letter-spacing:.4px}
+.pb-cap{margin-top:3px!important;font-size:8.8pt;font-weight:700}
+.pb-an{margin-top:7px}
+.pb-an h3{font-size:8pt;letter-spacing:1.1px;text-transform:uppercase;color:#333;margin-bottom:2px;font-weight:800}
+.pb-an p{font-size:9pt;margin-bottom:3px!important;text-align:justify}
+.pb-ft{border-top:1.5px solid #000;padding-top:6px;margin-top:4px;font-size:8.5pt;color:#333;
+  display:flex;justify-content:space-between}
+`;
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"]/g, c => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;"
+  })[c]);
+}
+
+// "KABE-KIAD-LGMK-LFMN_tanker-brief_2026-08-19" — used as the document title so
+// the print dialog and the iOS share sheet pre-fill a meaningful file name.
+function briefFileStem(legs) {
+  const codes = [];
+  if (legs[0] && legs[0].from) codes.push(legs[0].from);
+  for (const l of legs) if (l.to) codes.push(l.to);
+  const route = codes.map(c => String(c).toUpperCase().replace(/[^A-Z0-9]/g, "")).filter(Boolean).join("-") || "TRIP";
+  const d = new Date(),
+    p2 = n => String(n).padStart(2, "0");
+  return `${route}_tanker-brief_${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+function buildPrintHtml(brief) {
+  const {
+    legs,
+    results,
+    totalSavings,
+    route,
+    sym,
+    pos,
+    aircraft,
+    reserveFuel,
+    zfw,
+    ts
+  } = brief;
+  const totalExtra = results.reduce((a, r) => a + (r?.tankerLbs || 0), 0);
+  const mustTanker = results.some(r => r && r.decision === "MUST TANKER");
+  const verdict = mustTanker ? "MUST TANKER" : pos ? "TANKER" : "NO TANKER";
+  const first = results.find(Boolean) || {};
+  const zfwUsed = first.zfw || toNum(zfw, 0);
+  const sum = [["Net Savings", (pos ? "+" : "−") + fM(totalSavings, sym)], ["Total Extra Fuel", totalExtra > 0 ? fL(totalExtra) + " (" + fG(totalExtra) + ")" : "none"], ["Legs", String(legs.length)], ["Reserve", fL(reserveFuel)], ["Zero Fuel Weight", zfwUsed ? fL(zfwUsed) : "—"], ["Aircraft", aircraft.name || "GV"]];
+  const legHtml = legs.map((leg, i) => {
+    const r = results[i];
+    if (!r) return "";
+    const {
+      action,
+      mathRows,
+      narrative
+    } = legExplanation(leg, r, i, sym, reserveFuel);
+    const sub = [leg.distNm ? toNum(leg.distNm).toLocaleString() + " nm" : "", leg.cruiseAltFt ? "FL" + Math.round(toNum(leg.cruiseAltFt) / 100) : "", leg.plannedBurnLbs ? "planned burn " + fL(leg.plannedBurnLbs) : "planned burn " + fL(r.baseBurn) + " (computed)"].filter(Boolean).join(" · ");
+    const rows = mathRows.map(row => `<tr class="${row.highlight ? "hi" : ""}"><td class="k">${esc(row.l)}</td><td class="v">${esc(row.v)}</td></tr>`).join("");
+    const mtowOk = !r.mtow || r.takeoffWt <= r.mtow + 0.5;
+    const mlwOk = !r.mlw || r.landingWt <= r.mlw + 0.5;
+    const wt = `<b>Weight check</b> — Takeoff ${esc(fL(r.takeoffWt))} / MTOW ${esc(fL(r.mtow))} ${mtowOk ? "✓" : "✗ OVER"}` + (r.mlw > 0 ? ` &nbsp;·&nbsp; Landing ${esc(fL(r.landingWt))} / MLW ${esc(fL(r.mlw))} ${mlwOk ? "✓" : "✗ OVER"}` : "") + (r.capNote ? `<p class="pb-cap">▲ ${esc(r.capNote)}</p>` : "");
+    return `<section class="pb-leg">
+      <h2><span>Leg ${i + 1} — ${esc(leg.from || "—")} → ${esc(leg.to || "—")}</span><span class="pb-leg-sub">${esc(sub)}</span></h2>
+      <div class="pb-dec">${esc(action)}</div>
+      <table class="pb-fig"><tbody>${rows}</tbody></table>
+      <div class="pb-wt">${wt}</div>
+      ${narrative.length ? `<div class="pb-an"><h3>Analysis</h3>${narrative.map(n => `<p>${esc(n)}</p>`).join("")}</div>` : ""}
+    </section>`;
+  }).join("");
+  return `<div class="pb-hd">
+      <h1>E6B TANKERING BRIEF</h1>
+      <div class="pb-route">${esc(route)}</div>
+      <div class="pb-meta">${esc(aircraft.name || "GV")} · Generated ${esc(ts)}</div>
+      <div class="pb-verdict${pos || mustTanker ? "" : " neg"}">VERDICT: ${esc(verdict)}</div>
+    </div>
+    <section class="pb-sec">
+      <h2>Trip Summary</h2>
+      <dl class="pb-sum">${sum.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+      ${first.zfwAssumed ? `<p class="pb-note">No ZFW or payload entered — weights assume basic operating weight ${esc(fL(zfwUsed))} with nothing on board, so the Max Landing Weight check is optimistic.</p>` : ""}
+    </section>
+    ${legHtml}
+    <div class="pb-ft"><span>For planning purposes only · Verify with dispatch</span><span>${esc(ts)}</span></div>`;
+}
+function printBrief(brief) {
+  if (!brief) return false;
+  try {
+    const doc = document;
+    // Replace any host from a previous print rather than stacking them up.
+    const old = doc.getElementById(PRINT_HOST_ID);
+    if (old) old.remove();
+    if (!doc.getElementById(PRINT_STYLE_ID)) {
+      const st = doc.createElement("style");
+      st.id = PRINT_STYLE_ID;
+      st.textContent = PRINT_CSS;
+      doc.head.appendChild(st);
+    }
+    const host = doc.createElement("div");
+    host.id = PRINT_HOST_ID;
+    host.innerHTML = buildPrintHtml(brief);
+    doc.body.appendChild(host);
+    const prevTitle = doc.title;
+    doc.title = briefFileStem(brief.legs);
+    let restored = false;
+    const restore = () => {
+      if (restored) return;
+      restored = true;
+      doc.title = prevTitle;
+    };
+    // afterprint is unreliable on iOS, so also watch the print media query and
+    // keep a long backstop. The host is display:none on screen, so a late
+    // cleanup is harmless either way.
+    try {
+      window.addEventListener("afterprint", restore, {
+        once: true
+      });
+    } catch (e) {}
+    try {
+      const mql = window.matchMedia("print");
+      const onChange = e => {
+        if (!e.matches) {
+          restore();
+          mql.removeEventListener && mql.removeEventListener("change", onChange);
+        }
+      };
+      mql.addEventListener && mql.addEventListener("change", onChange);
+    } catch (e) {}
+    setTimeout(restore, 60000);
+    window.print();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // ── Brief Modal ───────────────────────────────────────────────────────────
 function BriefModal({
   brief,
@@ -7152,7 +7518,7 @@ function BriefModal({
         action,
         mathRows,
         narrative
-      } = legExplanation(leg, r, i);
+      } = legExplanation(leg, r, i, sym, reserveFuel);
       lines.push("─────────────────────");
       lines.push("LEG " + (i + 1) + ": " + leg.from + " → " + leg.to);
       if (leg.distNm) lines.push("Distance: " + leg.distNm + "nm");
@@ -7194,190 +7560,6 @@ function BriefModal({
       } catch {}
       document.body.removeChild(ta);
     }
-  }
-  function legExplanation(leg, r, i) {
-    const depP = toNum(r.depP || 0),
-      arrP = toNum(r.arrP || 0);
-    const diff = toNum(r.priceDiff || 0);
-    const be = toNum(r.breakEven || 0);
-    const hrs = toNum(r.hrs || 0);
-    const pen = toNum(r.penFactor || 0.04);
-    const isTanker = r.decision === "TANKER" || r.decision === "MUST TANKER";
-    const lc = LEG_COLORS[i % LEG_COLORS.length];
-    let action = "";
-    const uplift = r.fuelToLoad != null ? r.fuelToLoad : Math.max(0, (r.tripFuel || 0) + (r.tankerLbs || 0) - (r.fob || 0));
-    if (isTanker) action = "LOAD " + fL(uplift) + " (" + fG(uplift) + ") at " + leg.from + (uplift > r.tankerLbs ? " — incl. " + fL(r.tankerLbs) + " tankered" : "");else if (r.decision === "NO PURCHASE") action = "NO FUEL at " + leg.from + " — current FOB covers this leg";else if (r.fobCoversTrip) action = "NO FUEL at " + leg.from + " — depart with current FOB";else if (r.arrRampFee > 0) action = "TRIP FUEL ONLY at " + leg.from + " — cheaper to refuel at " + leg.to;else action = "TRIP FUEL ONLY at " + leg.from + " — cheaper to refuel at " + leg.to;
-    const isNoFuelB = r.decision === "NO PURCHASE" || r.fobCoversTrip;
-    const icon = isTanker ? "✅" : isNoFuelB ? "❌" : "⛽";
-    const bg = isTanker ? C.green : isNoFuelB ? C.red : C.gold;
-
-    // Build math rows
-    const mathRows = [];
-    if (depP > 0) mathRows.push({
-      l: "Fuel price at " + leg.from,
-      v: sym + depP.toFixed(3) + "/lb  ≈" + sym + (depP * 6.7).toFixed(2) + "/gal"
-    });
-    if (arrP > 0) mathRows.push({
-      l: "Fuel price at " + leg.to,
-      v: sym + arrP.toFixed(3) + "/lb  ≈" + sym + (arrP * 6.7).toFixed(2) + "/gal"
-    });
-    if (depP > 0 && arrP > 0) mathRows.push({
-      l: "Price difference",
-      v: (diff > 0 ? "+" : "") + sym + diff.toFixed(3) + "/lb  " + (diff > 0 ? "cheaper at " + leg.from : "cheaper at " + leg.to)
-    });
-    if (hrs > 0) mathRows.push({
-      l: "Estimated flight time",
-      v: hrs.toFixed(2) + " hrs"
-    });
-    if (r.baseBurn > 0) mathRows.push({
-      l: "Planned fuel burn",
-      v: fL(r.baseBurn)
-    });
-    mathRows.push({
-      l: "Trip fuel required (incl. reserve)",
-      v: fL(r.tripFuel)
-    });
-    if (r.fob > 0) mathRows.push({
-      l: "Fuel on board at departure",
-      v: fL(r.fob)
-    });
-    if (r.zfw > 0) mathRows.push({
-      l: "Zero fuel weight (ZFW)",
-      v: fL(r.zfw) + (r.zfwAssumed ? "  (BOW only — no payload entered)" : "")
-    });
-    if (r.maxTOFuel != null) {
-      const lim = [];
-      if (r.limTank != null) lim.push({
-        l: "Limit — tank capacity",
-        v: fL(r.limTank)
-      });
-      if (r.limMtow != null) lim.push({
-        l: "Limit — MTOW " + fL(r.mtow) + " − ZFW",
-        v: fL(r.limMtow)
-      });
-      if (r.mlw > 0 && Number.isFinite(r.limMlw)) lim.push({
-        l: "Limit — (MLW " + fL(r.mlw) + " − ZFW) + enroute burn " + fL(r.baseBurn),
-        v: fL(r.limMlw)
-      });
-      lim.forEach(x => mathRows.push(x));
-      mathRows.push({
-        l: "Max takeoff fuel (binding limit: " + (r.limitBy === "tank" ? "tank capacity" : r.limitBy) + ")",
-        v: fL(r.maxTOFuel),
-        highlight: true,
-        color: C.gold
-      });
-    }
-    if (r.maxExtra > 0) mathRows.push({
-      l: "Max additional fuel possible",
-      v: fL(r.maxExtra)
-    });
-    if (hrs > 0 && pen > 0 && depP > 0) mathRows.push({
-      l: "Burn penalty factor",
-      v: (pen * 100).toFixed(1) + "% per hr  =  " + sym + (pen * depP).toFixed(3) + "/lb/hr"
-    });
-    if (be > 0) mathRows.push({
-      l: "Break-even price diff needed",
-      v: sym + be.toFixed(3) + "/lb over " + hrs.toFixed(2) + " hrs"
-    });
-    if (r.tankerLbs > 0) {
-      const takeoffFuel = r.takeoffFuel != null ? r.takeoffFuel : r.tripFuel + r.tankerLbs;
-      const fuelToLoad = r.fuelToLoad != null ? r.fuelToLoad : Math.max(0, takeoffFuel - r.fob);
-      mathRows.push({
-        l: "Takeoff fuel (trip + extra)",
-        v: fL(takeoffFuel)
-      });
-      mathRows.push({
-        l: "Fuel to load",
-        v: fL(fuelToLoad) + "  (" + fG(fuelToLoad) + ")  (" + fLt(fuelToLoad) + ")",
-        highlight: true,
-        color: C.green
-      });
-      mathRows.push({
-        l: "Of which extra tankering",
-        v: fL(r.tankerLbs) + "  (" + fG(r.tankerLbs) + ")"
-      });
-      if (depP > 0) mathRows.push({
-        l: "Cost to purchase extra fuel",
-        v: sym + (r.tankerLbs * depP).toFixed(2) + " at " + leg.from
-      });
-      if (arrP > 0) mathRows.push({
-        l: "Cost if bought at destination",
-        v: sym + (r.tankerLbs * arrP).toFixed(2) + " at " + leg.to
-      });
-    }
-    if (r.depRampFee > 0) mathRows.push({
-      l: "Dep ramp fee at " + leg.from,
-      v: sym + toNum(r.depRampFee).toFixed(0) + (r.depRampWaived ? " (waived by fuel purchase)" : " (payable)")
-    });
-    if (r.savings !== 0) mathRows.push({
-      l: "Net savings / cost",
-      v: (r.savings > 0 ? "+" : "") + sym + r.savings.toFixed(2),
-      highlight: true,
-      color: r.savings > 0 ? C.green : C.red
-    });
-    if (r.takeoffWt > 0) mathRows.push({
-      l: "Takeoff weight (ZFW + takeoff fuel)",
-      v: fL(r.takeoffWt) + " / MTOW " + fL(r.mtow) + (r.overMtow > 0.5 ? "  ✗ OVER by " + fL(r.overMtow) : "  ✓"),
-      color: r.overMtow > 0.5 ? C.red : undefined
-    });
-    if (r.mlw > 0) mathRows.push({
-      l: "Landing weight (ZFW + takeoff fuel − enroute burn)",
-      v: fL(r.landingWt) + " / MLW " + fL(r.mlw) + (r.overMlw > 0.5 ? "  ✗ OVER by " + fL(r.overMlw) : "  ✓"),
-      highlight: true,
-      color: r.overMlw > 0.5 ? C.red : C.green
-    });
-    if (r.arrivalFob > 0) mathRows.push({
-      l: "Arrival FOB",
-      v: fL(r.arrivalFob) + " → carried to next leg"
-    });
-
-    // Build narrative
-    const narrative = [];
-    if (r.decision === "MUST TANKER") {
-      narrative.push("No fuel available at " + leg.to + ". You must carry all fuel needed for this leg from " + leg.from + ".");
-    } else if (r.decision === "NO PURCHASE") {
-      narrative.push("Current fuel on board (" + fL(r.fob) + ") fully covers the trip fuel requirement of " + fL(r.tripFuel) + " including the " + fL(toNum(reserveFuel)) + " reserve. No purchase is needed or beneficial at this stop.");
-    } else if (isTanker) {
-      if (diff > 0) {
-        narrative.push("Fuel is " + sym + diff.toFixed(3) + "/lb cheaper at " + leg.from + " than " + leg.to + ". After accounting for the burn penalty of " + sym + (pen * depP).toFixed(3) + "/lb per hour over " + hrs.toFixed(2) + " hours (break-even: " + sym + be.toFixed(3) + "/lb), the price advantage of " + sym + diff.toFixed(3) + "/lb still exceeds the cost of carrying the fuel.");
-      }
-      if (r.depRampFee > 0 && r.depRampWaived) {
-        narrative.push("The " + sym + toNum(r.depRampFee).toFixed(0) + " departure ramp fee at " + leg.from + " is waived by the fuel purchase.");
-      }
-      narrative.push("Net result: loading " + fL(r.tankerLbs) + " at " + leg.from + " saves " + sym + r.savings.toFixed(2) + " compared to buying at " + leg.to + ".");
-    } else {
-      // NO TANKER
-      if (r.fobCoversTrip) {
-        narrative.push("Current FOB (" + fL(r.fob) + ") already covers trip fuel (" + fL(r.tripFuel) + "). No additional fuel purchase needed at " + leg.from + ".");
-      } else if (diff <= 0) {
-        narrative.push("Fuel at " + leg.to + " (" + sym + arrP.toFixed(3) + "/lb) is cheaper than " + leg.from + " (" + sym + depP.toFixed(3) + "/lb). Load trip fuel only — no extra.");
-      } else if (diff > 0 && diff <= be) {
-        narrative.push("Although fuel is " + sym + diff.toFixed(3) + "/lb cheaper at " + leg.from + ", the burn penalty of " + sym + (pen * depP).toFixed(3) + "/lb per hour over " + hrs.toFixed(2) + " hours requires a price difference of at least " + sym + be.toFixed(3) + "/lb to break even. Carrying extra fuel would cost more than it saves.");
-      }
-      if (r.depRampFee > 0 && r.depRampOwed) {
-        narrative.push("A departure ramp fee of " + sym + toNum(r.depRampFee).toFixed(0) + " applies at " + leg.from + ".");
-      }
-      if (r.fobCoversTrip) {
-        narrative.push("Depart " + leg.from + " with current fuel. No purchase needed.");
-      } else {
-        narrative.push("Load trip fuel only at " + leg.from + ". Refuel at " + leg.to + " on arrival.");
-      }
-    }
-
-    // Weight envelope always gets the last word — it is the constraint a crew
-    // acts on, and it can override an otherwise-attractive tankering case.
-    if (r.capNote) narrative.push(r.capNote + ". Landing weight " + fL(r.landingWt) + " against MLW " + fL(r.mlw) + ".");
-    if (r.overMlw > 0.5) narrative.push("⚠ Landing weight " + fL(r.landingWt) + " exceeds MLW " + fL(r.mlw) + " by " + fL(r.overMlw) + " even without tankering — fuel must be offloaded at " + leg.from + " or burned off before landing.");
-    if (r.overMtow > 0.5) narrative.push("⚠ Takeoff weight " + fL(r.takeoffWt) + " exceeds MTOW " + fL(r.mtow) + " by " + fL(r.overMtow) + ".");
-    if (r.zfwAssumed) narrative.push("No ZFW or payload was entered, so these weights assume the aircraft's basic operating weight of " + fL(r.zfw) + " with nothing on board. The MLW limit shown is therefore optimistic — enter the trip's actual ZFW for a real number.");
-    return {
-      action,
-      icon,
-      bg,
-      lc,
-      mathRows,
-      narrative
-    };
   }
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7431,7 +7613,19 @@ function BriefModal({
       border: "1px solid " + (copied ? C.green + "55" : C.border),
       cursor: "pointer"
     }
-  }, copied ? "✓ Copied" : "📋 Copy"), /*#__PURE__*/React.createElement("span", {
+  }, copied ? "✓ Copied" : "📋 Copy"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => printBrief(brief),
+    style: {
+      padding: "4px 10px",
+      borderRadius: 6,
+      fontSize: 11,
+      fontWeight: 700,
+      background: C.panel,
+      color: C.sub,
+      border: "1px solid " + C.border,
+      cursor: "pointer"
+    }
+  }, "\u2913 PDF"), /*#__PURE__*/React.createElement("span", {
     style: {
       padding: "4px 12px",
       borderRadius: 6,
@@ -7534,7 +7728,7 @@ function BriefModal({
       lc,
       mathRows,
       narrative
-    } = legExplanation(leg, r, i);
+    } = legExplanation(leg, r, i, sym, reserveFuel);
     return /*#__PURE__*/React.createElement("div", {
       key: i,
       style: {
@@ -15052,6 +15246,17 @@ function E6B() {
     setTripFileErr(!!isErr);
     setTimeout(() => setTripFileMsg(m => m === msg ? "" : m), isErr ? 8000 : 4000);
   }
+
+  // The PDF always reflects the brief as currently calculated.
+  const canExportPdf = calculated && results.length > 0;
+  function exportBriefPdf() {
+    if (!canExportPdf) {
+      flashTripMsg("Run a calculation first", true);
+      return;
+    }
+    const brief = buildBrief(legs, results, totalSavings, currency, currentAc, reserveFuel, zfw);
+    if (!printBrief(brief)) flashTripMsg("❌ Could not open the print view", true);
+  }
   function exportTrip() {
     const payload = {
       app: "E6B",
@@ -15683,7 +15888,21 @@ function E6B() {
       fontWeight: 600,
       cursor: "pointer"
     }
-  }, "\u2912 Import Trip"), /*#__PURE__*/React.createElement("input", {
+  }, "\u2912 Import Trip"), /*#__PURE__*/React.createElement("button", {
+    onClick: exportBriefPdf,
+    disabled: !canExportPdf,
+    title: canExportPdf ? "Print or save the brief as a PDF" : "Run a calculation first",
+    style: {
+      background: "transparent",
+      border: "1px solid " + C.border,
+      borderRadius: 8,
+      padding: "8px 14px",
+      color: canExportPdf ? C.muted : C.muted + "66",
+      fontSize: 12,
+      fontWeight: 600,
+      cursor: canExportPdf ? "pointer" : "not-allowed"
+    }
+  }, "\u2913 Export PDF"), /*#__PURE__*/React.createElement("input", {
     ref: tripFileRef,
     type: "file",
     accept: ".json,application/json",
@@ -16041,7 +16260,7 @@ function E6B() {
       fontWeight: 700
     }
   }, r.savings > 0 ? "+" : r.savings < 0 ? "-" : "", fM(r.savings, sym)))))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setBriefModal(buildBrief(legs, results, totalSavings, currency, currentAc, reserveFuel)),
+    onClick: () => setBriefModal(buildBrief(legs, results, totalSavings, currency, currentAc, reserveFuel, zfw)),
     style: {
       width: "100%",
       background: C.panel,
