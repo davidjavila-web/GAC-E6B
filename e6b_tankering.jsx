@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.64";
+const APP_VERSION="1.65";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -489,6 +489,32 @@ function downloadJson(filename,obj){
     setTimeout(()=>{try{document.body.removeChild(a);}catch(e){}URL.revokeObjectURL(url);},0);
     return true;
   }catch(e){return false;}
+}
+
+
+// Consecutive legs share an airport: leg N's ARRIVAL is leg N+1's DEPARTURE, so
+// the same fuel price applies at the same field and there is no reason to make
+// anyone type it twice. Fills blanks only — an origin, price or altitude that is
+// already set (by the user, a trip sheet or a saved file) is never overwritten,
+// and a price is only inherited when the two airports actually match.
+function chainLegs(legsArr,priceByIcao){
+  const out=legsArr.map(l=>({...l}));
+  for(let i=0;i<out.length;i++){
+    const cur=out[i],prev=i>0?out[i-1]:null;
+    if(prev){
+      if(!cur.from&&prev.to)cur.from=prev.to;
+      if(!cur.depPrice&&prev.arrPrice&&cur.from&&prev.to&&
+         String(cur.from).toUpperCase()===String(prev.to).toUpperCase())cur.depPrice=prev.arrPrice;
+      if(!cur.cruiseAltFt&&prev.cruiseAltFt)cur.cruiseAltFt=prev.cruiseAltFt;
+    }
+    // Prices seen earlier this session at the same airport are the next-best source.
+    if(!cur.depPrice&&priceByIcao&&cur.from&&priceByIcao[String(cur.from).toUpperCase()])
+      cur.depPrice=priceByIcao[String(cur.from).toUpperCase()];
+    if(!cur.arrPrice&&priceByIcao&&cur.to&&priceByIcao[String(cur.to).toUpperCase()])
+      cur.arrPrice=priceByIcao[String(cur.to).toUpperCase()];
+    if(!cur.cruiseAltFt)cur.cruiseAltFt=DEFAULT_CRUISE_ALT;
+  }
+  return out;
 }
 
 function getBurn(ac,alt){
@@ -4724,8 +4750,16 @@ export default function E6B(){
     setResults(computeLegs(legs,initialFob,currentAc,reserveFuel,zfw));
   },[initialFob,aircraftId,reserveFuel,zfw,currency.code]);
   function addLeg(){
-    const last=legs[legs.length-1];
-    setLegs(ls=>[...ls,newLeg(last?.to||"",last?.cruiseAltFt||DEFAULT_CRUISE_ALT)]);
+    // The new leg departs where the last one arrived, so it inherits that
+    // airport, its fuel price and the cruise altitude. Destination, arrival
+    // price, distance and burn stay blank for the user to fill.
+    setLegs(ls=>{
+      const last=ls[ls.length-1];
+      const chained=chainLegs([...ls,newLeg("",last?.cruiseAltFt||DEFAULT_CRUISE_ALT)],priceMemory.current);
+      // Keep only the appended leg's chaining — existing legs stay exactly as the
+      // user left them, including any price they deliberately cleared.
+      return[...ls,chained[chained.length-1]];
+    });
     setCalculated(false);calcRef.current=false;
   }
   function removeLeg(i){setLegs(ls=>ls.filter((_,j)=>j!==i));setCalculated(false);calcRef.current=false;}
@@ -4743,10 +4777,16 @@ export default function E6B(){
       leg={...leg,arrPrice:pm[leg.to.toUpperCase()]};
     setLegs(ls=>{
       const next=[...ls];next[i]=leg;
-      // Carry arr price forward to next leg dep
-      if(i<next.length-1&&leg.arrPrice&&leg.arrPrice!==prevLeg.arrPrice){
-        const nd=next[i+1];
-        if(!nd.depPrice||nd.depPrice===prevLeg.arrPrice)next[i+1]={...nd,depPrice:leg.arrPrice};
+      if(i<next.length-1){
+        // This leg's arrival is the next leg's departure, so both the airport and
+        // its price flow forward — but only into a field that is still blank or
+        // still holds the value this leg used to have, never over a real edit.
+        let nd=next[i+1];
+        if(leg.to&&leg.to!==prevLeg.to&&(!nd.from||nd.from===prevLeg.to))
+          nd={...nd,from:leg.to};
+        if(leg.arrPrice&&leg.arrPrice!==prevLeg.arrPrice&&(!nd.depPrice||nd.depPrice===prevLeg.arrPrice))
+          nd={...nd,depPrice:leg.arrPrice};
+        if(nd!==next[i+1])next[i+1]=nd;
       }
       return next;
     });
@@ -4834,8 +4874,8 @@ export default function E6B(){
       const parsed=parseTripText(text);
       if(parsed&&parsed.length>0){
         const newLegs=parsed.map(p=>({...newLeg(p.from||""),from:p.from||"",to:p.to||"",distNm:p.distNm?String(p.distNm):"",plannedBurnLbs:p.plannedBurnLbs?String(p.plannedBurnLbs):"",cruiseAltFt:p.cruiseAltFt?String(p.cruiseAltFt):""}));
-        for(let pi=1;pi<newLegs.length;pi++)newLegs[pi].from=newLegs[pi-1].to;
-        setLegs(newLegs);setCalculated(false);setImportMsg("✅ "+parsed.length+" legs imported — add fuel prices");
+        setLegs(chainLegs(newLegs,priceMemory.current));
+        setCalculated(false);setImportMsg("✅ "+parsed.length+" legs imported — add fuel prices");
         setTimeout(()=>setImportMsg(""),4000);
       }else{
         // Couldn't auto-parse — dump OCR text into paste field
@@ -4855,8 +4895,8 @@ export default function E6B(){
       const parsed=parseTripText(pasteText);
       if(!parsed||parsed.length===0){setImportMsg("❌ No legs found — check format");setTimeout(()=>setImportMsg(""),5000);return;}
       const newLegs=parsed.map(p=>({...newLeg(p.from||""),from:p.from||"",to:p.to||"",distNm:p.distNm?String(p.distNm):"",plannedBurnLbs:p.plannedBurnLbs?String(p.plannedBurnLbs):"",cruiseAltFt:p.cruiseAltFt?String(p.cruiseAltFt):""}));
-      for(let pi=1;pi<newLegs.length;pi++)newLegs[pi].from=newLegs[pi-1].to;
-      setLegs(newLegs);setCalculated(false);setPasteText("");setShowPaste(false);
+      setLegs(chainLegs(newLegs,priceMemory.current));
+      setCalculated(false);setPasteText("");setShowPaste(false);
       setImportMsg("✅ "+parsed.length+" legs imported — add fuel prices");
       setTimeout(()=>setImportMsg(""),5000);
     }catch(err){setImportMsg("❌ "+err.message.slice(0,50));setTimeout(()=>setImportMsg(""),5000);}
@@ -4877,8 +4917,9 @@ export default function E6B(){
           plannedBurnLbs:p.plannedBurnLbs?String(p.plannedBurnLbs):"",
           depPrice:p.depPrice||"",arrPrice:p.arrPrice||"",
           depRampFee:p.depRampFee||"",depMinPurchase:p.depMinPurchase||""}));
-        for(let pi=1;pi<newLegs.length;pi++)newLegs[pi].from=newLegs[pi-1].to;
-        setLegs(newLegs);setCalculated(false);calcRef.current=false;
+        const chained=chainLegs(newLegs,priceMemory.current);
+        newLegs.splice(0,newLegs.length,...chained);
+        setLegs(chained);setCalculated(false);calcRef.current=false;
         const route=newLegs.map(l=>l.from).concat(newLegs[newLegs.length-1].to).join(" → ");
         const tripLabel=parsed.tripNum?"Trip #"+parsed.tripNum+": ":"";
         const n=newLegs.length;
