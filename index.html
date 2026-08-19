@@ -4059,7 +4059,7 @@ const CURRENCIES = [{
   code: "AED",
   symbol: "د.إ"
 }];
-const APP_VERSION = "1.62";
+const APP_VERSION = "1.63";
 const LBS_PER_GAL = 6.7,
   LBS_PER_L = 1.77;
 
@@ -5969,7 +5969,8 @@ function Field({
   onNext,
   color,
   legNum,
-  legContext
+  legContext,
+  placeholder
 }) {
   const [showPad, setShowPad] = useState(false);
   const hasKb = useHasKeyboard();
@@ -6019,6 +6020,7 @@ function Field({
     type: "text",
     inputMode: "decimal",
     value: local,
+    placeholder: placeholder,
     onChange: e => setLocal(e.target.value),
     onFocus: e => {
       focusedRef.current = true;
@@ -6048,6 +6050,7 @@ function Field({
   }) : /*#__PURE__*/React.createElement("input", {
     readOnly: true,
     value: groupNum(value),
+    placeholder: placeholder,
     onClick: () => setShowPad(true),
     style: {
       width: "100%",
@@ -16017,29 +16020,13 @@ function E6B() {
       color: C.muted,
       marginTop: 4
     }
-  }, "Enter actual FOB before first leg. Subsequent legs auto-calculated.")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("label", {
-    style: {
-      ...LS,
-      color: C.sub
-    }
-  }, "Reserve Fuel (lbs)"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
+  }, "Enter actual FOB before first leg. Subsequent legs auto-calculated.")), /*#__PURE__*/React.createElement(Field, {
+    label: "Reserve Fuel (lbs)",
     value: reserveFuel,
-    onChange: e => {
-      setReserveFuel(e.target.value);
-    },
-    style: {
-      width: "100%",
-      background: C.bg,
-      border: "1.5px solid " + C.border,
-      borderRadius: 8,
-      padding: "10px 12px",
-      color: C.text,
-      fontSize: 16,
-      outline: "none",
-      boxSizing: "border-box"
-    }
-  })), /*#__PURE__*/React.createElement("div", {
+    onChange: setReserveFuel,
+    step: "100",
+    fieldId: "reserve"
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 10,
       background: C.bg,
@@ -16047,29 +16034,14 @@ function E6B() {
       border: "1.5px solid " + (zfwIsAssumed ? C.amber : C.border) + "88",
       padding: "12px 14px"
     }
-  }, /*#__PURE__*/React.createElement("label", {
-    style: {
-      ...LS,
-      color: zfwIsAssumed ? C.amber : C.sub
-    }
-  }, "Zero Fuel Weight (lbs) \u2014 BOW + payload"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Zero Fuel Weight (lbs) \u2014 BOW + payload",
     value: zfw,
-    onChange: e => {
-      setZfw(e.target.value);
-    },
-    placeholder: String(currentAc.bow || 48557),
-    style: {
-      width: "100%",
-      background: C.card,
-      border: "1.5px solid " + C.border,
-      borderRadius: 8,
-      padding: "10px 12px",
-      color: C.text,
-      fontSize: 16,
-      outline: "none",
-      boxSizing: "border-box"
-    }
+    onChange: setZfw,
+    step: "100",
+    fieldId: "zfw",
+    color: zfwIsAssumed ? C.amber : C.accent,
+    placeholder: groupNum(String(currentAc.bow || 48557))
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,

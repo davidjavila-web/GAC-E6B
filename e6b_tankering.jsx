@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.62";
+const APP_VERSION="1.63";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -1043,7 +1043,7 @@ function NumPadOverlay({children,onClose}){
 
 // ── Field component ───────────────────────────────────────────────────────
 // window.__e6b is a registry of open functions keyed by fieldId
-function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext}){
+function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext,placeholder}){
   const[showPad,setShowPad]=useState(false);
   const hasKb=useHasKeyboard();
   const lc=color||C.accent;
@@ -1072,14 +1072,14 @@ function Field({label,value,onChange,step,fieldId,onNext,color,legNum,legContext
       <div style={{fontSize:11,fontWeight:600,color:lc,textTransform:"uppercase",letterSpacing:.8,marginBottom:5}}>{label}</div>
       <div style={{position:"relative"}}>
         {hasKb
-          ?<input type="text" inputMode="decimal" value={local}
+          ?<input type="text" inputMode="decimal" value={local} placeholder={placeholder}
              onChange={e=>setLocal(e.target.value)}
              onFocus={e=>{focusedRef.current=true;e.target.select();setLocal(normNum(local));}}
              onBlur={commit}
              onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();commit();e.target.blur();if(onNext)onNext();}}}
              style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
                padding:"10px 40px 10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
-          :<input readOnly value={groupNum(value)} onClick={()=>setShowPad(true)}
+          :<input readOnly value={groupNum(value)} placeholder={placeholder} onClick={()=>setShowPad(true)}
              style={{width:"100%",background:lc+"0d",border:"1.5px solid "+lc+"55",borderRadius:8,
                padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box",cursor:"pointer"}}/>}
         {hasKb&&<button type="button" onMouseDown={e=>e.preventDefault()} onClick={()=>setShowPad(true)}
@@ -5015,16 +5015,11 @@ export default function E6B(){
               <div style={{fontSize:11,color:C.muted,marginTop:4}}>Enter actual FOB before first leg. Subsequent legs auto-calculated.</div>
             </div>
             {/* Cruise altitude lives on each leg card — legs cruise at different levels. */}
-            <div>
-              <label style={{...LS,color:C.sub}}>Reserve Fuel (lbs)</label>
-              <input type="number" value={reserveFuel} onChange={e=>{setReserveFuel(e.target.value);}}
-                style={{width:"100%",background:C.bg,border:"1.5px solid "+C.border,borderRadius:8,padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
-            </div>
+            <Field label="Reserve Fuel (lbs)" value={reserveFuel} onChange={setReserveFuel} step="100" fieldId="reserve"/>
             {/* ZFW drives the MTOW and MLW ceilings on how much fuel can legally be loaded. */}
             <div style={{marginTop:10,background:C.bg,borderRadius:10,border:"1.5px solid "+(zfwIsAssumed?C.amber:C.border)+"88",padding:"12px 14px"}}>
-              <label style={{...LS,color:zfwIsAssumed?C.amber:C.sub}}>Zero Fuel Weight (lbs) — BOW + payload</label>
-              <input type="number" value={zfw} onChange={e=>{setZfw(e.target.value);}} placeholder={String(currentAc.bow||48557)}
-                style={{width:"100%",background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"10px 12px",color:C.text,fontSize:16,outline:"none",boxSizing:"border-box"}}/>
+              <Field label="Zero Fuel Weight (lbs) — BOW + payload" value={zfw} onChange={setZfw} step="100"
+                fieldId="zfw" color={zfwIsAssumed?C.amber:C.accent} placeholder={groupNum(String(currentAc.bow||48557))}/>
               <div style={{fontSize:11,color:zfwIsAssumed?C.amber:C.muted,marginTop:5,lineHeight:1.5}}>
                 {zfwIsAssumed
                   ?<>⚠ Blank — assuming BOW {fL(currentAc.bow||48557)} with no payload. The Max Landing Weight check is <b>optimistic</b>; enter your actual ZFW for a real limit.</>
