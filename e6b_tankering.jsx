@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.67";
+const APP_VERSION="1.68";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -3399,6 +3399,7 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
   // every leg's wheels-up→wheels-down flight in whole minutes. The governing limit is the
   // anchor leg's crew rolling24. Flag ONLY when the total is STRICTLY GREATER THAN the
   // limit — exactly the limit (e.g. 12:00) is COMPLIANT. Report the single worst window.
+  let rollingPeak=null;
   if(allLegs.length){
     const WIN=86400000;
     let worst=null;
@@ -3420,6 +3421,7 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
       const excess=totalMin-limitMin;
       if(!worst||excess>worst.excess)worst={anchorIdx:a,up,totalMin,limitMin,parts,excess,periodIdx:allLegs[lastInWin].periodIdx,label:dl.label,reg:dl.reg};
     }
+    if(worst)rollingPeak={totalMin:worst.totalMin,limitMin:worst.limitMin,anchorIdx:worst.anchorIdx};
     if(worst&&worst.excess>0){
       const contribStr=worst.parts.map(p=>`Leg ${p.legIdx+1} ${fmtHM(p.mins)}`).join(" + ");
       const zd=new Date(worst.up),zMon=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][zd.getMonth()];
@@ -3438,7 +3440,7 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
         msg:`window from Leg ${worst.anchorIdx+1} wheels-up (${zwin}): ${contribStr} = ${fmtHM(worst.totalMin)}, exceeds ${fmtHM(worst.limitMin)} by ${fmtHM(worst.excess)}.`});
     }
   }
-  return{dutyResults,violations,totalFlight,totalDuty,totalRest,allLegs,limits};
+  return{dutyResults,violations,totalFlight,totalDuty,totalRest,allLegs,limits,rollingPeak};
 }
 
 // ── Trip Timeline — true-to-scale vertical zulu calendar of the whole trip ──
@@ -3531,6 +3533,203 @@ function TripTimeline({result,offFor}){
         <div style={{position:"absolute",right:6,top:yy-7,background:C.red,color:"#fff",fontSize:8,fontWeight:800,borderRadius:4,padding:"1px 5px",zIndex:6,whiteSpace:"nowrap",boxShadow:"0 1px 2px rgba(0,0,0,.35)"}}>{tag}</div>
       </React.Fragment>);})}
   </div>);
+}
+
+// ── Suggested fixes ───────────────────────────────────────────────────────
+// Every option below is generated as a concrete candidate change, re-run through
+// the REAL analysis engine, and kept only if it clears the violation it targets
+// without introducing a new one. Nothing here is heuristic advice: if an option
+// is listed, the engine has already confirmed the exact value works.
+const vSig=v=>v.type==="rolling24"?"rolling24":v.type+":"+v.period;
+// Group header: the violation kind plus where it bites.
+const vHead=v=>v.type==="rolling24"?{t:"ROLLING-24",s:"peak 24-hour window"}
+  :v.type==="rest"?{t:"REST",s:"before DP"+(v.period+1)}
+  :{t:v.type.toUpperCase(),s:"DP"+(v.period+1)};
+const vLabel=sig=>{
+  const[t,p]=sig.split(":");
+  if(t==="rolling24")return"the rolling-24 violation";
+  if(t==="rest")return"the rest violation before DP"+(toNum(p)+1);
+  return"the "+t+" violation in DP"+(toNum(p)+1);
+};
+
+// One trial run of the whole pipeline with a single candidate change applied.
+function suggestionTrial(baseLegs,opts){
+  const resolved=resolveLegTimes(baseLegs.map(l=>({...l})));
+  let legs=resolved;
+  if(opts.shiftFrom!=null&&opts.deltaMs)
+    legs=legs.map((l,i)=>i<opts.shiftFrom?l:{...l,depEpoch:l.depEpoch+opts.deltaMs,arrEpoch:l.arrEpoch+opts.deltaMs});
+  if(opts.splitAfter!=null)
+    legs=legs.map((l,i)=>i===opts.splitAfter?{...l,hasRest:true}:l);
+  if(opts.dropIdx!=null)legs=legs.filter((_,i)=>i!==opts.dropIdx);
+  if(!legs.length)return null;
+  return computeDutyAnalysis(groupDutyPeriods(legs),opts.crewMode,opts.on,opts.off,opts.offsets,opts.overrides);
+}
+
+function buildSuggestions(baseLegs,result,cfg,offFor){
+  const base={crewMode:cfg.crewMode,on:cfg.on,off:cfg.off,offsets:cfg.offsets||{},overrides:cfg.overrides||{}};
+  const beforeSigs=new Set(result.violations.map(vSig));
+  const DR=result.dutyResults,AL=result.allLegs;
+  const legIdxOf=leg=>AL.findIndex(l=>l.depEpoch===leg.depEpoch&&l.origin===leg.origin);
+  const offsetsFor=(pi,on,off)=>({...base.offsets,[pi]:{on,off}});
+  const onOf=pi=>DR[pi].onMin,offOf=pi=>DR[pi].offMin;
+
+  // Run a candidate and accept it only if it clears `targetSig` and adds nothing new.
+  const check=(targetSig,extra)=>{
+    let a;
+    try{a=suggestionTrial(baseLegs,{...base,...extra});}catch(e){return null;}
+    if(!a)return null;
+    const after=new Set(a.violations.map(vSig));
+    if(after.has(targetSig))return null;
+    for(const sg of after)if(!beforeSigs.has(sg))return null;
+    return{analysis:a,alsoClears:[...beforeSigs].filter(sg=>sg!==targetSig&&!after.has(sg))};
+  };
+  const clock=(ms,icao,date)=>epochLZ(ms,offFor?offFor(icao,date):null);
+
+  // Crew candidates for a period, tried in increasing order of disruption.
+  const crewOptions=(targetSig,pi,why)=>{
+    const out=[],cur=DR[pi].crewMode;
+    for(const n of [3,4,2]){
+      if(n===cur)continue;
+      const r=check(targetSig,{overrides:{...base.overrides,[pi]:n}});
+      if(!r)continue;
+      const lim=CREW_LIMITS[n];
+      out.push({lever:n>cur?"Augment crew":"Reduce crew",
+        text:(n>cur?"Augment DP":"Fly DP")+(pi+1)+" as "+lim.label.toLowerCase(),
+        detail:why(lim),alsoClears:r.alsoClears,
+        apply:{kind:"crew",period:pi,crew:n}});
+      if(n>cur)break;   // the smallest augmentation that works is enough
+    }
+    return out;
+  };
+
+  const groups=[];
+  result.violations.forEach(v=>{
+    const sig=vSig(v),opts=[];
+
+    if(v.type==="rest"){
+      const i=v.period,cur=DR[i],prev=DR[i-1];
+      if(cur&&prev){
+        const fl=cur.legs[0];
+        // A — delay the whole period until the rest requirement is met exactly.
+        const need=cur.restReq*3600000;
+        const from=cur.restStartMs!=null?cur.restStartMs:prev.dutyEnd;
+        const delta=Math.ceil((from+need-cur.dutyStart)/60000)*60000;
+        if(delta>0){
+          const gi=legIdxOf(fl);
+          const r=gi>=0?check(sig,{shiftFrom:gi,deltaMs:delta}):null;
+          if(r)opts.push({lever:"Delay report",
+            text:"Delay DP"+(i+1)+" start to "+clock(cur.dutyStart+delta,fl.origin,fl.date),
+            detail:fmtHM(delta/60000)+" later — first leg "+fl.origin+"→"+fl.dest+" moves to "+
+                   clock(fl.depEpoch+delta,fl.origin,fl.date)+", giving exactly the "+cur.restReq+"h required"+
+                   (cur.restFromP91?" measured from the back-end Part 91 arrival":"")+".",
+            tradeoff:"Pushes every later leg back by the same "+fmtHM(delta/60000)+".",
+            alsoClears:r.alsoClears});
+        }
+        const shortMin=Math.ceil(v.shortMin);
+        // B — take the shortfall out of the previous period's Off offset.
+        if(!prev.p91RestStart){
+          const newOff=offOf(i-1)-shortMin;
+          if(newOff>=10){
+            const r=check(sig,{offsets:offsetsFor(i-1,onOf(i-1),newOff)});
+            if(r)opts.push({lever:"Trim duty-off offset",
+              text:"Cut DP"+i+" Off offset from "+offOf(i-1)+" to "+newOff+" min",
+              detail:"Ends DP"+i+" duty "+fmtHM(shortMin)+" earlier, which is exactly the shortfall.",
+              alsoClears:r.alsoClears,apply:{kind:"offset",period:i-1,on:onOf(i-1),off:newOff}});
+          }
+        }
+        // C — or out of this period's On offset.
+        const newOn=onOf(i)-shortMin;
+        if(newOn>=30){
+          const r=check(sig,{offsets:offsetsFor(i,newOn,offOf(i))});
+          if(r)opts.push({lever:"Trim duty-on offset",
+            text:"Cut DP"+(i+1)+" On offset from "+onOf(i)+" to "+newOn+" min",
+            detail:"Starts DP"+(i+1)+" duty "+fmtHM(shortMin)+" later without moving any leg.",
+            alsoClears:r.alsoClears,apply:{kind:"offset",period:i,on:newOn,off:offOf(i)}});
+        }
+        // D — crew config, which only helps when it LOWERS the required rest.
+        crewOptions(sig,i-1,lim=>"Rest after DP"+i+" becomes "+lim.restAfter+"h, at or below the "+
+          cur.restReq+"h currently required.").forEach(o=>opts.push(o));
+      }
+    }
+
+    if(v.type==="duty"||v.type==="flight"){
+      const i=v.period,dp=DR[i];
+      const kind=v.type==="duty"?"duty":"flight";
+      crewOptions(sig,i,lim=>"Raises the "+kind+" limit to "+fmtHM((kind==="duty"?lim.duty:lim.flight)*60)+
+        ", clearing the actual "+fmtHM(v.actualMin)+".").forEach(o=>opts.push(o));
+      const excess=v.actualMin-v.limitMin;
+      if(v.type==="duty"){
+        // Duty = flight block + On + Off, so trimming the offsets is a direct lever.
+        const availOff=Math.max(0,offOf(i)-10),availOn=Math.max(0,onOf(i)-30);
+        if(availOff+availOn>=excess){
+          const takeOff=Math.min(availOff,excess),takeOn=excess-takeOff;
+          const nOff=offOf(i)-takeOff,nOn=onOf(i)-takeOn;
+          const r=check(sig,{offsets:offsetsFor(i,nOn,nOff)});
+          if(r)opts.push({lever:"Trim duty offsets",
+            text:"Set DP"+(i+1)+" offsets to On "+nOn+" min / Off "+nOff+" min",
+            detail:"Removes exactly "+fmtHM(excess)+" of duty"+(takeOn?" ("+takeOff+" min off the tail, "+takeOn+" min off the front)":"")+
+                   ", bringing DP"+(i+1)+" to the "+fmtHM(v.limitMin)+" limit.",
+            alsoClears:r.alsoClears,apply:{kind:"offset",period:i,on:nOn,off:nOff}});
+        }
+      }
+      if(v.type==="flight"){
+        // Move a leg out of the period — verified by removing it from the trip.
+        for(let li=dp.legs.length-1;li>=0;li--){
+          const leg=dp.legs[li],gi=legIdxOf(leg);
+          if(gi<0||leg.flightMins<excess)continue;
+          const r=check(sig,{dropIdx:gi});
+          if(r){opts.push({lever:"Move a leg",
+            text:"Move Leg "+(gi+1)+" ("+leg.origin+"→"+leg.dest+", "+fmtHM(leg.flightMins)+") to another duty period",
+            detail:"Drops DP"+(i+1)+" flight time to "+fmtHM(v.actualMin-leg.flightMins)+", inside the "+fmtHM(v.limitMin)+" limit.",
+            tradeoff:"The receiving duty period needs room for it under its own limits.",
+            alsoClears:r.alsoClears});break;}
+        }
+      }
+      // Split the period at its longest internal gap, if that gap can serve as rest.
+      let bestGap=null;
+      for(let li=0;li<dp.legs.length-1;li++){
+        const g=dp.legs[li+1].depEpoch-dp.legs[li].arrEpoch;
+        if(!bestGap||g>bestGap.g)bestGap={g,li};
+      }
+      if(bestGap){
+        const gi=legIdxOf(dp.legs[bestGap.li]);
+        const r=gi>=0?check(sig,{splitAfter:gi}):null;
+        if(r)opts.push({lever:"Split the duty period",
+          text:"Split DP"+(i+1)+" after Leg "+(gi+1)+" — take the "+fmtHM(Math.round(bestGap.g/60000))+" gap as rest",
+          detail:"Splits into two duty periods, each inside its own "+kind+" limit.",
+          alsoClears:r.alsoClears});
+      }
+    }
+
+    if(v.type==="rolling24"){
+      const i=v.period;
+      crewOptions(sig,i,lim=>"Raises the rolling-24 limit to "+fmtHM(lim.rolling24*60)+
+        ", so the "+fmtHM(v.totalMin)+" peak window now fits.").forEach(o=>opts.push(o));
+      // Delay the last leg in the busiest window until the window drops under the
+      // limit. Smallest 5-minute step that the engine confirms.
+      const tail=v.parts&&v.parts.length?v.parts[v.parts.length-1].legIdx:null;
+      if(tail!=null&&AL[tail]){
+        const leg=AL[tail];
+        for(let m=5;m<=16*60;m+=5){
+          const r=check(sig,{shiftFrom:tail,deltaMs:m*60000});
+          if(r){
+            const pk=r.analysis.rollingPeak;
+            opts.push({lever:"Delay a leg",
+              text:"Delay Leg "+(tail+1)+" ("+leg.origin+"→"+leg.dest+") to "+clock(leg.depEpoch+m*60000,leg.origin,leg.date),
+              detail:fmtHM(m)+" later — enough of it falls outside the 24-hour window to bring the peak from "+
+                     fmtHM(v.totalMin)+" to "+(pk?fmtHM(pk.totalMin):"under the limit")+", inside the "+fmtHM(v.limitMin)+" limit.",
+              tradeoff:"Pushes every later leg back by the same "+fmtHM(m)+".",
+              alsoClears:r.alsoClears});
+            break;
+          }
+        }
+      }
+    }
+
+    if(opts.length)groups.push({sig,violation:v,options:opts.slice(0,4)});
+    else groups.push({sig,violation:v,options:[]});
+  });
+  return groups;
 }
 
 // ── FlightDutyCalc Component ─────────────────────────────────────────────
@@ -3987,6 +4186,32 @@ function FlightDutyCalc(){
   // Free-text per-period duty-offset edit: sanitize to 0–999 whole minutes (blank kept
   // as "" → treated as 0 by the engine), store as a per-period override, and live-
   // recompute that period's Duty On/Off + duty check without clearing the results.
+  // Advisory only — buildSuggestions never touches entered data, it just re-runs
+  // candidate changes through the engine to find which exact values would clear
+  // each violation. Memoised because a rolling-24 delay search alone can be ~200
+  // trial analyses.
+  const suggestions=React.useMemo(()=>{
+    if(!result||!result.violations.length||!parsed)return[];
+    let legs=[...parsed.legs];
+    if(needDate&&startDay)legs[0]={...legs[0],date:{day:toNum(startDay),month:startMonth,year2:toNum(startYear)}};
+    if(!legs[0].date)return[];
+    try{
+      return buildSuggestions(legs,result,{crewMode,on:toNum(dutyOnDef)||0,off:toNum(dutyOffDef)||0,
+        offsets:customOffsets,overrides:crewOverrides},tzOffsetFor);
+    }catch(e){return[];}
+  },[result,parsed,crewMode,dutyOnDef,dutyOffDef,customOffsets,crewOverrides,needDate,startDay,startMonth,startYear]);
+
+  function applySuggestion(a){
+    if(!a)return;
+    if(a.kind==="crew"){
+      const no={...crewOverrides,[a.period]:a.crew};
+      setCrewOverrides(no);recomputeWith(no);
+    }else if(a.kind==="offset"){
+      const no={...customOffsets,[a.period]:{on:a.on,off:a.off}};
+      setCustomOffsets(no);recomputeWith(crewOverrides,undefined,no);
+    }
+  }
+
   function setPeriodOffset(pi,field,rawText){
     const clean=rawText.replace(/[^0-9]/g,"").slice(0,3);
     const cur=customOffsets[pi]||{on:toNum(dutyOnDef)||0,off:toNum(dutyOffDef)||0};
@@ -4457,6 +4682,52 @@ function FlightDutyCalc(){
             </div>);
           })}
         </div>);
+      })()}
+
+      {/* ── SUGGESTED FIXES — only when the trip is NO-GO ── */}
+      {result.violations.length>0&&suggestions.length>0&&(()=>{
+        const AZ="ABCDEFGH";
+        return<div style={{background:C.card,border:"2px solid "+C.accent+"55",borderRadius:14,padding:16,marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+            <span style={{fontSize:18}}>🛠️</span>
+            <div style={{fontSize:14,fontWeight:800,color:C.accent}}>Suggested Fixes</div>
+          </div>
+          <div style={{fontSize:11,color:C.muted,marginBottom:12,lineHeight:1.45}}>
+            Every option below was re-run through the calculator and only listed if it actually clears the violation.
+            Advisory only — nothing here changes your entered legs unless you tap Apply.
+          </div>
+          {suggestions.map((g,gi)=>(
+            <div key={gi} style={{marginBottom:gi<suggestions.length-1?14:0,paddingBottom:gi<suggestions.length-1?14:0,
+              borderBottom:gi<suggestions.length-1?"1px solid "+C.border:"none"}}>
+              <div style={{fontSize:11,fontWeight:800,color:C.red,letterSpacing:.6,marginBottom:2}}>
+                {vHead(g.violation).t} — {vHead(g.violation).s}
+              </div>
+              <div style={{fontSize:11,color:C.sub,marginBottom:8,lineHeight:1.45}}>{g.violation.msg}</div>
+              {g.options.length===0
+                ?<div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>
+                   No single change to crew, offsets or timing clears this one — it needs a schedule rebuild.
+                 </div>
+                :g.options.map((o,oi)=>(
+                  <div key={oi} style={{background:C.bg,borderRadius:9,padding:"9px 11px",marginBottom:oi<g.options.length-1?7:0,
+                    border:"1px solid "+C.border}}>
+                    <div style={{display:"flex",alignItems:"flex-start",gap:8}}>
+                      <span style={{background:C.accent,color:"#fff",borderRadius:5,minWidth:19,height:19,display:"flex",
+                        alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,flexShrink:0,marginTop:1}}>{AZ[oi]}</span>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:12.5,fontWeight:800,color:C.text,lineHeight:1.35}}>{o.text}</div>
+                        <div style={{fontSize:11,color:C.sub,marginTop:3,lineHeight:1.45}}>{o.detail}</div>
+                        {o.alsoClears&&o.alsoClears.length>0&&<div style={{fontSize:11,color:C.green,fontWeight:700,marginTop:4,lineHeight:1.4}}>
+                          ✓ Also clears {o.alsoClears.map(vLabel).join(" and ")}.
+                        </div>}
+                        {o.tradeoff&&<div style={{fontSize:10.5,color:C.gold,marginTop:4,lineHeight:1.4}}>⚠ {o.tradeoff}</div>}
+                      </div>
+                      {o.apply&&<button onClick={()=>applySuggestion(o.apply)}
+                        style={{flexShrink:0,background:C.accent+"1f",border:"1px solid "+C.accent+"66",borderRadius:7,
+                          padding:"5px 11px",color:C.accent,fontSize:11,fontWeight:800,cursor:"pointer"}}>Apply</button>}
+                    </div>
+                  </div>))}
+            </div>))}
+        </div>;
       })()}
 
       {/* ── TRIP TIMELINE (collapsible, above the duty-period cards) ── */}
