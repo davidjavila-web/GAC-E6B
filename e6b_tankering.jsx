@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.68";
+const APP_VERSION="1.69";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -3540,6 +3540,9 @@ function TripTimeline({result,offFor}){
 // the REAL analysis engine, and kept only if it clears the violation it targets
 // without introducing a new one. Nothing here is heuristic advice: if an option
 // is listed, the engine has already confirmed the exact value works.
+// Options carry a `change` descriptor recording the exact candidate the engine
+// verified. It is metadata for the text and for tests — nothing applies it. The
+// calculator never modifies entered legs, offsets or crew config from a suggestion.
 const vSig=v=>v.type==="rolling24"?"rolling24":v.type+":"+v.period;
 // Group header: the violation kind plus where it bites.
 const vHead=v=>v.type==="rolling24"?{t:"ROLLING-24",s:"peak 24-hour window"}
@@ -3596,7 +3599,7 @@ function buildSuggestions(baseLegs,result,cfg,offFor){
       out.push({lever:n>cur?"Augment crew":"Reduce crew",
         text:(n>cur?"Augment DP":"Fly DP")+(pi+1)+" as "+lim.label.toLowerCase(),
         detail:why(lim),alsoClears:r.alsoClears,
-        apply:{kind:"crew",period:pi,crew:n}});
+        change:{kind:"crew",period:pi,crew:n}});
       if(n>cur)break;   // the smallest augmentation that works is enough
     }
     return out;
@@ -3634,7 +3637,7 @@ function buildSuggestions(baseLegs,result,cfg,offFor){
             if(r)opts.push({lever:"Trim duty-off offset",
               text:"Cut DP"+i+" Off offset from "+offOf(i-1)+" to "+newOff+" min",
               detail:"Ends DP"+i+" duty "+fmtHM(shortMin)+" earlier, which is exactly the shortfall.",
-              alsoClears:r.alsoClears,apply:{kind:"offset",period:i-1,on:onOf(i-1),off:newOff}});
+              alsoClears:r.alsoClears,change:{kind:"offset",period:i-1,on:onOf(i-1),off:newOff}});
           }
         }
         // C — or out of this period's On offset.
@@ -3644,7 +3647,7 @@ function buildSuggestions(baseLegs,result,cfg,offFor){
           if(r)opts.push({lever:"Trim duty-on offset",
             text:"Cut DP"+(i+1)+" On offset from "+onOf(i)+" to "+newOn+" min",
             detail:"Starts DP"+(i+1)+" duty "+fmtHM(shortMin)+" later without moving any leg.",
-            alsoClears:r.alsoClears,apply:{kind:"offset",period:i,on:newOn,off:offOf(i)}});
+            alsoClears:r.alsoClears,change:{kind:"offset",period:i,on:newOn,off:offOf(i)}});
         }
         // D — crew config, which only helps when it LOWERS the required rest.
         crewOptions(sig,i-1,lim=>"Rest after DP"+i+" becomes "+lim.restAfter+"h, at or below the "+
@@ -3669,7 +3672,7 @@ function buildSuggestions(baseLegs,result,cfg,offFor){
             text:"Set DP"+(i+1)+" offsets to On "+nOn+" min / Off "+nOff+" min",
             detail:"Removes exactly "+fmtHM(excess)+" of duty"+(takeOn?" ("+takeOff+" min off the tail, "+takeOn+" min off the front)":"")+
                    ", bringing DP"+(i+1)+" to the "+fmtHM(v.limitMin)+" limit.",
-            alsoClears:r.alsoClears,apply:{kind:"offset",period:i,on:nOn,off:nOff}});
+            alsoClears:r.alsoClears,change:{kind:"offset",period:i,on:nOn,off:nOff}});
         }
       }
       if(v.type==="flight"){
@@ -4201,17 +4204,6 @@ function FlightDutyCalc(){
     }catch(e){return[];}
   },[result,parsed,crewMode,dutyOnDef,dutyOffDef,customOffsets,crewOverrides,needDate,startDay,startMonth,startYear]);
 
-  function applySuggestion(a){
-    if(!a)return;
-    if(a.kind==="crew"){
-      const no={...crewOverrides,[a.period]:a.crew};
-      setCrewOverrides(no);recomputeWith(no);
-    }else if(a.kind==="offset"){
-      const no={...customOffsets,[a.period]:{on:a.on,off:a.off}};
-      setCustomOffsets(no);recomputeWith(crewOverrides,undefined,no);
-    }
-  }
-
   function setPeriodOffset(pi,field,rawText){
     const clean=rawText.replace(/[^0-9]/g,"").slice(0,3);
     const cur=customOffsets[pi]||{on:toNum(dutyOnDef)||0,off:toNum(dutyOffDef)||0};
@@ -4694,7 +4686,7 @@ function FlightDutyCalc(){
           </div>
           <div style={{fontSize:11,color:C.muted,marginBottom:12,lineHeight:1.45}}>
             Every option below was re-run through the calculator and only listed if it actually clears the violation.
-            Advisory only — nothing here changes your entered legs unless you tap Apply.
+            Advisory only — these are values to apply yourself. Nothing here changes your entered legs, offsets or crew config.
           </div>
           {suggestions.map((g,gi)=>(
             <div key={gi} style={{marginBottom:gi<suggestions.length-1?14:0,paddingBottom:gi<suggestions.length-1?14:0,
@@ -4721,9 +4713,6 @@ function FlightDutyCalc(){
                         </div>}
                         {o.tradeoff&&<div style={{fontSize:10.5,color:C.gold,marginTop:4,lineHeight:1.4}}>⚠ {o.tradeoff}</div>}
                       </div>
-                      {o.apply&&<button onClick={()=>applySuggestion(o.apply)}
-                        style={{flexShrink:0,background:C.accent+"1f",border:"1px solid "+C.accent+"66",borderRadius:7,
-                          padding:"5px 11px",color:C.accent,fontSize:11,fontWeight:800,cursor:"pointer"}}>Apply</button>}
                     </div>
                   </div>))}
             </div>))}
