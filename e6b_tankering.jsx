@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.65";
+const APP_VERSION="1.66";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -3315,11 +3315,31 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
   periods.forEach((period,pi)=>{
     const onOff=customOffsets[pi]||{on:dutyOnDefMin,off:dutyOffDefMin};
     const pLegs=period.legs;
+    // ── Part 91 back-end exclusion ──────────────────────────────────────
+    // Only a CONTIGUOUS run of Part 91 legs at the very TAIL of the period
+    // qualifies. Those legs sit outside the Part 135 duty clock entirely: their
+    // flight time counts toward neither the per-period nor the rolling-24 total,
+    // and duty ends at the last Part 135 arrival, not theirs.
+    // A Part 91 leg with any 135 leg after it is NOT back-end — the exclusion is
+    // only POI-approved for the tail — so it counts exactly like a 135 leg and
+    // gets flagged for the UI.
+    // A period made up entirely of 91 legs has no 135 leg to anchor a duty period,
+    // so nothing is excluded; it is reported normally with a note.
+    let tailStart=pLegs.length;
+    while(tailStart>0&&pLegs[tailStart-1].isPart91)tailStart--;
+    const p91AllLegs=tailStart===0&&pLegs.some(l=>l.isPart91);
+    const backEndFrom=p91AllLegs?pLegs.length:tailStart;
+    const countedLegs=pLegs.slice(0,backEndFrom);
+    const p91Legs=pLegs.slice(backEndFrom);
+    const p91MisplacedIdx=countedLegs.reduce((a,l,li)=>l.isPart91?a.concat(li):a,[]);
+    const p91FlightMin=p91Legs.reduce((s,l)=>s+l.flightMins,0);
+    // Rest after the period is measured from the LAST back-end 91 leg's arrival.
+    const p91RestStart=p91Legs.length?p91Legs[p91Legs.length-1].arrEpoch:null;
     // Per-leg crew configs. A manual DP override (crewOverrides[pi]) forces the whole period.
     // Reading A: if ANY leg is augmented (3/4-pilot), the MAX crew config across the period's
     // legs governs duty max, flight max and rest AFTER (135.269). Rest BEFORE is governed by the
     // FIRST leg's crew — whoever reports for duty when the period begins (requirement 3).
-    const legCrews=pLegs.map(l=>l.crewMode||crewMode);
+    const legCrews=countedLegs.map(l=>l.crewMode||crewMode);
     const forced=crewOverrides[pi];
     const firstCrew=forced||legCrews[0];
     const maxCrew=forced||Math.max(...legCrews);
@@ -3327,11 +3347,12 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
     const firstLimits=limOf(firstCrew); // restBefore
     const augmented=maxCrew>=3;
     const mixed=!forced&&new Set(legCrews).size>1;
-    const firstDep=pLegs[0].depEpoch,lastArr=pLegs[pLegs.length-1].arrEpoch;
+    // Duty ends at the last Part 135 arrival — the 91 tail is outside the clock.
+    const firstDep=countedLegs[0].depEpoch,lastArr=countedLegs[countedLegs.length-1].arrEpoch;
     const dutyStart=firstDep-onOff.on*60000,dutyEnd=lastArr+onOff.off*60000;
     const dutyMin=Math.round((dutyEnd-dutyStart)/60000);
     const dutyHrs=dutyMin/60;
-    const flightMin=pLegs.reduce((s,l)=>s+l.flightMins,0); // exact integer minutes
+    const flightMin=countedLegs.reduce((s,l)=>s+l.flightMins,0); // exact integer minutes
     const flightHrs=flightMin/60;
     const dutyPct=dutyHrs/govLimits.duty,flightPct=flightHrs/govLimits.flight;
     const dutyStatus=dutyPct>1?"red":dutyPct>=0.8?"amber":"green";
@@ -3341,19 +3362,26 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
     if(flightMin>govLimits.flight*60)violations.push({period:pi,type:"flight",actualMin:flightMin,limitMin:govLimits.flight*60,label:govLimits.label,reg:govLimits.reg,
       msg:`Flight time in duty period ${pi+1} is ${fmtHM(flightMin)} — exceeds ${fmtHM(govLimits.flight*60)} max for ${govLimits.label}.`});
     totalFlight+=flightHrs;totalDuty+=dutyHrs;
-    pLegs.forEach(l=>allLegs.push({...l,periodIdx:pi}));
-    dutyResults.push({periodIdx:pi,legs:pLegs,dutyStart,dutyEnd,dutyHrs,flightHrs,dutyStatus,flightStatus,onMin:onOff.on,offMin:onOff.off,
+    pLegs.forEach((l,li)=>allLegs.push({...l,periodIdx:pi,
+      p91Excluded:li>=backEndFrom,                       // back-end 91 — outside duty & flight limits
+      p91Misplaced:li<backEndFrom&&!!l.isPart91}));      // 91 leg with a 135 leg after it — counted normally
+    dutyResults.push({periodIdx:pi,legs:pLegs,countedLegs,p91Legs,p91FlightMin,p91RestStart,p91AllLegs,p91MisplacedIdx,
+      dutyStart,dutyEnd,dutyHrs,flightHrs,dutyStatus,flightStatus,onMin:onOff.on,offMin:onOff.off,
       crewMode:maxCrew,firstCrew,maxCrew,limits:govLimits,firstLimits,augmented,mixed,legCrews,restAfter:govLimits.restAfter});
   });
   // Rest between periods = LARGER of DP(N)'s restAfter (its MAX config) and DP(N+1)'s
   // restBefore (its FIRST-leg config).
   for(let i=1;i<dutyResults.length;i++){
     const prev=dutyResults[i-1],cur=dutyResults[i];
-    const restMinExact=(cur.dutyStart-prev.dutyEnd)/60000;
+    // Rest runs from the previous period's duty-off — or, when that period ended
+    // with back-end Part 91 legs, from the final 91 leg's actual arrival.
+    const restFrom=prev.p91RestStart!=null?prev.p91RestStart:prev.dutyEnd;
+    const restMinExact=(cur.dutyStart-restFrom)/60000;
     const restHrs=restMinExact/60;
     const afterHrs=prev.restAfter,beforeHrs=cur.firstLimits.restBefore;
     const req=Math.max(afterHrs,beforeHrs),reqMin=req*60;
     cur.restBefore=restHrs;cur.restReq=req;
+    cur.restStartMs=restFrom;cur.restFromP91=prev.p91RestStart!=null;
     cur.restAfterPrevHrs=afterHrs;cur.restAfterPrevLabel=prev.limits.label;
     cur.restBeforeHrs=beforeHrs;cur.restBeforeLabel=cur.firstLimits.label;
     totalRest+=restHrs;
@@ -3375,10 +3403,12 @@ function computeDutyAnalysis(periods,crewMode,dutyOnDefMin,dutyOffDefMin,customO
     const WIN=86400000;
     let worst=null;
     for(let a=0;a<allLegs.length;a++){
+      if(allLegs[a].p91Excluded)continue;   // excluded flight can't anchor a window either
       const up=allLegs[a].depEpoch,winEnd=up+WIN;
       let totalMin=0;const parts=[];let lastInWin=a; // latest flight STARTING in this window = "current" crew
       for(let j=0;j<allLegs.length;j++){
         const lg=allLegs[j];
+        if(lg.p91Excluded)continue;         // back-end Part 91 — not flight time for the limit
         const os=Math.max(lg.depEpoch,up),oe=Math.min(lg.arrEpoch,winEnd);
         if(oe>os){const mins=Math.round((oe-os)/60000);totalMin+=mins;parts.push({legIdx:j,origin:lg.origin,dest:lg.dest,mins});}
         if(lg.depEpoch>=up&&lg.depEpoch<winEnd)lastInWin=j;
@@ -3449,8 +3479,18 @@ function TripTimeline({result,offFor}){
     {/* Start-day band */}
     <div style={{position:"absolute",left:LANE_L,top:1,zIndex:3}}><span style={{fontSize:8,fontWeight:800,color:dark?C.light:"#fff",background:C.panel,borderRadius:4,padding:"1px 6px"}}>{dayLab(startMs)}</span></div>
     {/* Duty-period rails */}
-    {result.dutyResults.map((dp,di)=>{const t0=y(dp.legs[0].depEpoch),t1=y(dp.legs[dp.legs.length-1].arrEpoch);
+    {result.dutyResults.map((dp,di)=>{const cl=dp.countedLegs&&dp.countedLegs.length?dp.countedLegs:dp.legs;
+      const t0=y(cl[0].depEpoch),t1=y(cl[cl.length-1].arrEpoch);
       return<div key={"rail"+di} title={"DP"+(di+1)} style={{position:"absolute",left:LANE_L,top:t0,height:Math.max(3,t1-t0),width:4,background:railColor(dp),borderRadius:2,zIndex:1}}/>;})}
+    {/* Duty-off marker — drawn only where a back-end Part 91 tail follows, so the
+        excluded legs are visibly outside the duty clock. */}
+    {result.dutyResults.map((dp,di)=>{
+      if(!dp.p91Legs||!dp.p91Legs.length)return null;
+      const yy=y(dp.dutyEnd);
+      return(<React.Fragment key={"doff"+di}>
+        <div style={{position:"absolute",left:GUT,right:8,top:yy,height:0,borderTop:"1.5px dashed "+C.gold,zIndex:4}}/>
+        <div style={{position:"absolute",right:6,top:yy-7,background:C.gold,color:"#fff",fontSize:8,fontWeight:800,borderRadius:4,padding:"1px 5px",zIndex:5,whiteSpace:"nowrap"}}>DUTY OFF DP{di+1}</div>
+      </React.Fragment>);})}
     {/* Rest blocks (between duty periods) */}
     {result.dutyResults.map((dp,di)=>{if(di===0||dp.restBefore===undefined)return null;
       const prev=result.dutyResults[di-1];const pl=prev.legs[prev.legs.length-1],nl=dp.legs[0];
@@ -3461,15 +3501,21 @@ function TripTimeline({result,offFor}){
         backgroundImage:`repeating-linear-gradient(45deg, ${col}${ok?"12":"22"} 0, ${col}${ok?"12":"22"} 5px, transparent 5px, transparent 11px)`,padding:"4px 8px"}}>
         <div style={{fontSize:10,fontWeight:800,color:col}}>REST {fmtHM(Math.round(dp.restBefore*60))} {ok?"· OK":"· SHORT "+fmtHM(Math.round((dp.restReq-dp.restBefore)*60))}</div>
         {h>=42&&<div style={{fontSize:9,color:C.sub,marginTop:1,fontFamily:"ui-monospace,Menlo,monospace",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{zLoc(a0,offFor(pl.dest,pl.date))} → {zLoc(a1,offFor(nl.origin,nl.date))}</div>}
-        {h>=56&&<div style={{fontSize:9,color:C.muted,marginTop:1}}>need {fmtHM(dp.restReq*60)} · {dp.restAfterPrevLabel} after DP{di}</div>}
+        {h>=56&&<div style={{fontSize:9,color:C.muted,marginTop:1}}>need {fmtHM(dp.restReq*60)} · {dp.restAfterPrevLabel} after DP{di}{dp.restFromP91?" · from Part 91 arrival":""}</div>}
       </div>);})}
     {/* Leg blocks */}
-    {legs.map((lg,gi)=>{const top=y(lg.depEpoch),h=Math.max(26,lg.flightMins/60*HOUR);const col=dutyLegColor(gi);
-      return(<div key={"leg"+gi} style={{position:"absolute",left:LEG_L,right:8,top,height:h,background:col,borderRadius:8,color:"#fff",padding:"3px 8px",boxSizing:"border-box",overflow:"hidden",zIndex:2,boxShadow:"0 1px 3px rgba(0,0,0,.22)"}}>
+    {legs.map((lg,gi)=>{const top=y(lg.depEpoch),h=Math.max(26,lg.flightMins/60*HOUR);
+      const ex=!!lg.p91Excluded;const col=ex?C.muted:dutyLegColor(gi);
+      return(<div key={"leg"+gi} style={{position:"absolute",left:LEG_L,right:8,top,height:h,background:col,borderRadius:8,color:"#fff",padding:"3px 8px",boxSizing:"border-box",overflow:"hidden",zIndex:2,boxShadow:"0 1px 3px rgba(0,0,0,.22)",
+        opacity:ex?.82:1,border:ex?"1.5px dashed "+C.gold:"none",
+        backgroundImage:ex?`repeating-linear-gradient(45deg, rgba(255,255,255,.16) 0, rgba(255,255,255,.16) 5px, transparent 5px, transparent 11px)`:"none"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
-          <span style={{fontSize:10,fontWeight:800,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>LEG {gi+1} · {lg.origin} → {lg.dest}</span>
+          <span style={{fontSize:10,fontWeight:800,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+            {ex&&<span style={{background:C.gold,color:"#fff",borderRadius:3,padding:"0 4px",marginRight:5,fontSize:8,letterSpacing:.4}}>91</span>}
+            LEG {gi+1} · {lg.origin} → {lg.dest}{lg.p91Misplaced?" · 91":""}</span>
           <span style={{fontSize:9,fontWeight:800,background:"rgba(255,255,255,.25)",borderRadius:4,padding:"1px 5px",whiteSpace:"nowrap",flexShrink:0}}>{fmtHM(lg.flightMins)}</span>
         </div>
+        {ex&&h>=26&&<div style={{fontSize:8,fontWeight:700,marginTop:1,letterSpacing:.3}}>PART 91 · excluded from duty &amp; flight limits</div>}
         {h>=40&&<div style={{fontSize:9,opacity:.95,marginTop:1,fontFamily:"ui-monospace,Menlo,monospace",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{zLoc(lg.depEpoch,offFor(lg.origin,lg.date))} → {zLoc(lg.arrEpoch,offFor(lg.dest,lg.date))}</div>}
       </div>);})}
     {/* Exact-moment violation markers */}
@@ -3494,7 +3540,7 @@ function FlightDutyCalc(){
   const[crewOverrides,setCrewOverrides]=useState({}); // { [dpIndex]: crewMode } — per-duty-period crew config
   const[dutyInputMode,setDutyInputMode]=useState("import"); // "import" or "manual"
   const[manualImport,setManualImport]=useState(false); // capture panel open within manual entry
-  const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:"",mode:"Z",crewMode:2}]);
+  const[manualLegs,setManualLegs]=useState([{origin:"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:"",mode:"Z",crewMode:2,isPart91:false}]);
   const[pasteText,setPasteText]=useState("");
   const[parseError,setParseError]=useState("");
   const[parsed,setParsed]=useState(null);
@@ -3781,7 +3827,7 @@ function FlightDutyCalc(){
     ingestParsed(p);
   }
 
-  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:ls[ls.length-1]?.date||"",mode:ls[ls.length-1]?.mode||"Z",crewMode:ls[ls.length-1]?.crewMode||crewMode}]);}
+  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:ls[ls.length-1]?.date||"",mode:ls[ls.length-1]?.mode||"Z",crewMode:ls[ls.length-1]?.crewMode||crewMode,isPart91:false}]);}
   function removeManualLeg(i){setManualLegs(ls=>ls.length<=1?ls:ls.filter((_,j)=>j!==i));}
 
   // DST-aware UTC offset for an ICAO on a given date (string "YYYY-MM-DD" or the
@@ -3893,7 +3939,7 @@ function FlightDutyCalc(){
           date={day:toNum(dp[2]),month:monthNames[toNum(dp[1])],year2:toNum(dp[0].slice(-2))};
         }
       }
-      legs.push({origin:ml.origin.toUpperCase(),dest:ml.dest.toUpperCase(),depH,depM,arrH,arrM,flightMins,hasRest:false,restMins:null,date,crewMode:ml.crewMode||crewMode,isLocal:ml.mode==="L"});
+      legs.push({origin:ml.origin.toUpperCase(),dest:ml.dest.toUpperCase(),depH,depM,arrH,arrM,flightMins,hasRest:false,restMins:null,date,crewMode:ml.crewMode||crewMode,isLocal:ml.mode==="L",isPart91:!!ml.isPart91});
     }
     if(legs.length===0)return;
     setParseError("");
@@ -4006,7 +4052,7 @@ function FlightDutyCalc(){
     const mode=isLocal?"L":"Z";
     const depInput=isLocal?(l.origLocalDep||localFromUtc(depT,tzOffsetFor(l.origin,l.date)||0)):depT;
     const arrInput=isLocal?(l.origLocalArr||localFromUtc(arrT,tzOffsetFor(l.dest,l.date)||0)):arrT;
-    return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode};
+    return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode,isPart91:!!l.isPart91};
   }
   // Append screenshot-parsed legs to the manual-entry list. Never wipes entered legs —
   // only replaces a single still-blank placeholder card; otherwise appends to the bottom.
@@ -4055,6 +4101,7 @@ function FlightDutyCalc(){
         const tint=legTint(i);
         const mode=ml.mode||"Z",isL=mode==="L";
         const legCrew=ml.crewMode||crewMode;
+        const is91=!!ml.isPart91;
         // Live flight time from canonical UTC buffers (kept current as the user types).
         const depMin=hhmmToMin(ml.depTime||""),arrMin=hhmmToMin(ml.arrTime||"");
         let ftMin=null;
@@ -4097,10 +4144,24 @@ function FlightDutyCalc(){
               <div style={subLbl}>{mode==="Z"?"Zulu":"Local"+(ml.dest?" "+ml.dest:"")}{arrUnknown?" ?":""}</div>
             </div>
           </div>
-          {/* Crew selector — full width */}
-          <div style={{display:"flex",gap:0,background:C.card,borderRadius:7,padding:2,border:"1px solid "+C.border,marginTop:10}}>
-            {[2,3,4].map(n=>(<button key={n} onClick={()=>updateManualLeg(i,"crewMode",n)} style={{flex:1,padding:"5px 4px",borderRadius:5,border:"none",background:legCrew===n?tint.badge+"22":"transparent",color:legCrew===n?tint.badge:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
+          {/* Crew selector + operating rule — full width */}
+          <div style={{display:"flex",gap:8,marginTop:10}}>
+            <div style={{display:"flex",gap:0,background:C.card,borderRadius:7,padding:2,border:"1px solid "+C.border,flex:2}}>
+              {[2,3,4].map(n=>(<button key={n} onClick={()=>updateManualLeg(i,"crewMode",n)} style={{flex:1,padding:"5px 4px",borderRadius:5,border:"none",background:legCrew===n?tint.badge+"22":"transparent",color:legCrew===n?tint.badge:C.muted,fontSize:11,fontWeight:700,cursor:"pointer"}}>{n} Pilot</button>))}
+            </div>
+            {/* Part 91 = repositioning / ferry, not for-hire. Only a 91 leg at the
+                END of a duty period is excluded from duty and flight limits. */}
+            <div style={{display:"flex",gap:0,background:C.card,borderRadius:7,padding:2,border:"1px solid "+(is91?C.gold:C.border),flex:1}}>
+              {[{v:false,l:"135"},{v:true,l:"91"}].map(({v,l})=>(
+                <button key={l} onClick={()=>updateManualLeg(i,"isPart91",v)}
+                  style={{flex:1,padding:"5px 4px",borderRadius:5,border:"none",
+                    background:is91===v?(v?C.gold+"26":tint.badge+"22"):"transparent",
+                    color:is91===v?(v?C.gold:tint.badge):C.muted,fontSize:11,fontWeight:800,cursor:"pointer"}}>{l}</button>))}
+            </div>
           </div>
+          {is91&&<div style={{fontSize:10,color:C.gold,marginTop:6,lineHeight:1.45}}>
+            Part 91 — repositioning / ferry. Excluded from duty &amp; flight limits only when it is at the <b>end</b> of the duty period.
+          </div>}
         </div>);
       })}
       </div>
@@ -4323,13 +4384,44 @@ function FlightDutyCalc(){
         <span style={{fontSize:10,color:C.muted}}>local (zuluz)</span>
       </div>
 
+      {/* ── PART 91 SUMMARY — what was excluded and why ── */}
+      {(()=>{
+        const excl=result.allLegs.filter(l=>l.p91Excluded);
+        const mis=result.allLegs.filter(l=>l.p91Misplaced);
+        const orphan=result.dutyResults.filter(d=>d.p91AllLegs);
+        if(!excl.length&&!mis.length&&!orphan.length)return null;
+        const no=l=>result.allLegs.indexOf(l)+1;
+        const exMin=excl.reduce((a,l)=>a+l.flightMins,0);
+        return<div style={{background:C.gold+"12",border:"2px solid "+C.gold+"44",borderRadius:14,padding:14,marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:excl.length||mis.length?8:0}}>
+            <span style={{fontSize:18}}>📋</span>
+            <div style={{fontSize:13,fontWeight:800,color:C.gold}}>Part 91 legs</div>
+          </div>
+          {excl.length>0&&<div style={{fontSize:12,color:C.sub,lineHeight:1.5,marginBottom:mis.length||orphan.length?6:0}}>
+            <b style={{color:C.text}}>{excl.map(l=>"Leg "+no(l)).join(", ")}</b> ({fmtHM(exMin)}) {excl.length>1?"are":"is"} back-end Part 91 —
+            at the end of {excl.length>1?"their":"its"} duty period with no Part 135 leg after,
+            so {excl.length>1?"they are":"it is"} excluded from the duty clock, the per-period flight limit and the rolling-24 total.
+            Duty off is the last Part 135 arrival; the required rest runs from the final Part 91 arrival at the crew-config minimum.
+          </div>}
+          {mis.length>0&&<div style={{fontSize:12,color:C.gold,lineHeight:1.5,marginBottom:orphan.length?6:0}}>
+            ⚠ Part 91 exclusion applies only to back-end legs (91 legs at the end of the duty period).
+            {" "}<b>{mis.map(l=>"Leg "+no(l)).join(", ")}</b> {mis.length>1?"have":"has"} a 135 leg after {mis.length>1?"them":"it"} and {mis.length>1?"are":"is"} counted normally.
+          </div>}
+          {orphan.length>0&&<div style={{fontSize:12,color:C.gold,lineHeight:1.5}}>
+            ⚠ {orphan.map(d=>"Duty period "+(d.periodIdx+1)).join(", ")} {orphan.length>1?"contain":"contains"} only Part 91 legs —
+            with no Part 135 leg to anchor a duty period nothing is excluded, and {orphan.length>1?"they are":"it is"} shown in full.
+          </div>}
+        </div>;
+      })()}
+
       {/* ── VIOLATION SUMMARY (top of results) ── */}
       {(()=>{
         const vs=result.violations;
         if(vs.length===0)return(<div style={{background:C.green+"14",border:"2px solid "+C.green+"55",borderRadius:14,padding:16,marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
           <span style={{fontSize:22}}>✅</span>
           <div><div style={{fontSize:14,fontWeight:800,color:C.green}}>All clear — compliant with FAR 135.267/.269</div>
-            <div style={{fontSize:12,color:C.sub,marginTop:2}}>No duty, flight, rest, or rolling-24 violations across {result.dutyResults.length} duty period{result.dutyResults.length>1?"s":""}.</div></div>
+            <div style={{fontSize:12,color:C.sub,marginTop:2}}>No duty, flight, rest, or rolling-24 violations across {result.dutyResults.length} duty period{result.dutyResults.length>1?"s":""}.
+            {result.allLegs.some(l=>l.p91Excluded)?" Back-end Part 91 legs were excluded from the duty and flight limits.":""}</div></div>
         </div>);
         const catName={rest:"REST",flight:"FLIGHT",duty:"DUTY",rolling24:"ROLLING-24"};
         const regShort=s=>String(s||"").replace("FAR ","");
@@ -4403,11 +4495,36 @@ function FlightDutyCalc(){
             ℹ️ Augmented crew: FAR 135.269(b)(2) limits each pilot to 8 hours of flight deck duty (time at the controls) in any 24 consecutive hours. This tool does not track per-pilot rotation — the crew manages seat rotation to stay within this limit.
           </div>}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-            {(()=>{const fl=dp.legs[0],ll=dp.legs[dp.legs.length-1];
+            {(()=>{const cl=dp.countedLegs||dp.legs;const fl=cl[0],ll=cl[cl.length-1];
               const onOff=tzOffsetFor(fl.origin,fl.date),offOff=tzOffsetFor(ll.dest,ll.date);
               return[{l:"Duty On",v:epochLZ(dp.dutyStart,onOff)},{l:"Duty Off",v:epochLZ(dp.dutyEnd,offOff)}].map(({l,v})=>(
                 <div key={l} style={{background:C.bg,borderRadius:8,padding:"8px 10px"}}><div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:.4}}>{l}</div><div style={{fontSize:12,fontWeight:700,color:C.text,marginTop:2}}>{v}</div></div>));})()}
           </div>
+          {/* Part 91 status for this duty period */}
+          {(()=>{
+            const back=dp.p91Legs||[],mis=dp.p91MisplacedIdx||[];
+            if(!back.length&&!mis.length&&!dp.p91AllLegs)return null;
+            const legNo=l=>result.allLegs.findIndex(al=>al.depEpoch===l.depEpoch)+1;
+            return<div style={{background:C.gold+"12",border:"1px solid "+C.gold+"44",borderRadius:8,padding:"8px 10px",marginBottom:10}}>
+              {back.length>0&&<>
+                <div style={{fontSize:11,fontWeight:800,color:C.gold}}>
+                  PART 91 · EXCLUDED — {back.map(l=>"Leg "+legNo(l)).join(", ")} ({fmtHM(dp.p91FlightMin)})
+                </div>
+                <div style={{fontSize:10,color:C.sub,marginTop:3,lineHeight:1.45}}>
+                  Back-end Part 91 — excluded from duty &amp; flight limits. Duty off is the last Part 135 arrival;
+                  the {dp.restAfter}h rest ({dp.limits.label}) runs from the final 91 arrival.
+                </div>
+              </>}
+              {mis.length>0&&<div style={{fontSize:10,color:C.gold,marginTop:back.length?6:0,lineHeight:1.45}}>
+                ⚠ Part 91 exclusion applies only to back-end legs (91 legs at the end of the duty period).
+                {" "}{mis.map(li=>"Leg "+legNo(dp.legs[li])).join(", ")} {mis.length>1?"have":"has"} a 135 leg after {mis.length>1?"them":"it"} and {mis.length>1?"are":"is"} counted normally.
+              </div>}
+              {dp.p91AllLegs&&<div style={{fontSize:10,color:C.gold,marginTop:back.length||mis.length?6:0,lineHeight:1.45}}>
+                ⚠ Every leg in this duty period is Part 91 — there is no Part 135 leg to anchor a duty period,
+                so nothing is excluded and the period is shown in full.
+              </div>}
+            </div>;
+          })()}
           {/* ── THIS DUTY PERIOD: duty + flight (measured within this period only) ── */}
           {(()=>{
             const dutyMin=Math.round(dp.dutyHrs*60),flightMin=Math.round(dp.flightHrs*60);
@@ -4440,6 +4557,7 @@ function FlightDutyCalc(){
                 <span style={{color:C.muted}}>Rest before</span><span style={{color:ok?C.green:C.red,fontWeight:700}}>{fmtHrs2(dp.restBefore)} · min {dp.restReq}h required</span>
               </div>
               <div style={{fontSize:10,color:C.muted,marginTop:3,lineHeight:1.4}}>{dp.restAfterPrevHrs}h after {dp.restAfterPrevLabel} duty / {dp.restBeforeHrs}h before {dp.restBeforeLabel} start of next duty</div>
+              {dp.restFromP91&&<div style={{fontSize:10,color:C.gold,marginTop:3,lineHeight:1.4}}>Measured from the back-end Part 91 arrival, not duty-off.</div>}
             </div>);})()}
           {/* Per-duty offsets — free-text whole minutes (0–999), live-recompute this period */}
           <div style={{display:"flex",gap:8,marginBottom:10}}>
@@ -4457,13 +4575,18 @@ function FlightDutyCalc(){
             })}
           </div>
           {/* Legs */}
-          {dp.legs.map((leg,li)=>(
-            <div key={li} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderTop:li>0?"1px solid "+C.border:"none",fontSize:11,flexWrap:"wrap"}}>
+          {dp.legs.map((leg,li)=>{
+            const excluded=li>=(dp.countedLegs?dp.countedLegs.length:dp.legs.length);
+            return(
+            <div key={li} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderTop:li>0?"1px solid "+C.border:"none",fontSize:11,flexWrap:"wrap",opacity:excluded?.72:1,
+              backgroundImage:excluded?`repeating-linear-gradient(45deg, ${C.gold}14 0, ${C.gold}14 5px, transparent 5px, transparent 11px)`:"none"}}>
               <span style={{color:C.accent,fontWeight:700,minWidth:42}}>Leg {(result.allLegs.findIndex(al=>al.depEpoch===leg.depEpoch))+1}</span>
-              <span style={{color:C.text,fontWeight:700}}>{leg.origin}→{leg.dest}</span>
+              {leg.isPart91&&<span style={{background:C.gold+(excluded?"33":"1f"),color:C.gold,borderRadius:4,padding:"1px 5px",fontSize:9,fontWeight:800,letterSpacing:.4}}>
+                {excluded?"91 · EXCLUDED":"91"}</span>}
+              <span style={{color:C.text,fontWeight:700,textDecoration:excluded?"line-through":"none"}}>{leg.origin}→{leg.dest}</span>
               <span style={{color:C.muted,flex:1,textAlign:"right"}}>{clockLZ(leg.depH,leg.depM,tzOffsetFor(leg.origin,leg.date))} – {clockLZ(leg.arrH,leg.arrM,tzOffsetFor(leg.dest,leg.date))}</span>
-              <span style={{color:C.gold,fontWeight:700,minWidth:40,textAlign:"right"}}>{fmtHM(leg.flightMins)}</span>
-            </div>))}
+              <span style={{color:excluded?C.muted:C.gold,fontWeight:700,minWidth:40,textAlign:"right",textDecoration:excluded?"line-through":"none"}}>{fmtHM(leg.flightMins)}</span>
+            </div>);})}
         </div>);
       })}
 
@@ -4481,7 +4604,10 @@ function FlightDutyCalc(){
         <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:18}}>🛏️</span>
           <div><div style={{fontSize:12,fontWeight:700,color:C.text}}>Required Rest After Mission</div>
             <div style={{fontSize:11,color:C.muted,marginTop:2}}>
-              {(()=>{const last=result.dutyResults.length>0?result.dutyResults[result.dutyResults.length-1]:null;const ra=last?last.restAfter:limits.restAfter;const ll=last?last.legs[last.legs.length-1]:null;const offOff=ll?tzOffsetFor(ll.dest,ll.date):null;return`Minimum ${ra} hrs before next duty (${last?last.limits.label:limits.label} rest after)`+(last?` · Available at ${epochLZ(last.dutyEnd+ra*3600000,offOff)}`:"");})()}
+              {(()=>{const last=result.dutyResults.length>0?result.dutyResults[result.dutyResults.length-1]:null;const ra=last?last.restAfter:limits.restAfter;const ll=last?last.legs[last.legs.length-1]:null;const offOff=ll?tzOffsetFor(ll.dest,ll.date):null;
+                // A back-end Part 91 tail pushes the rest start out to its arrival.
+                const from=last?(last.p91RestStart!=null?last.p91RestStart:last.dutyEnd):null;
+                return`Minimum ${ra} hrs before next duty (${last?last.limits.label:limits.label} rest after)`+(last?` · Available at ${epochLZ(from+ra*3600000,offOff)}`:"")+(last&&last.p91RestStart!=null?" · measured from the back-end Part 91 arrival":"");})()}
             </div></div></div>
       </div>
 
