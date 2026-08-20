@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.69";
+const APP_VERSION="1.70";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -3586,12 +3586,28 @@ function buildSuggestions(baseLegs,result,cfg,offFor){
     for(const sg of after)if(!beforeSigs.has(sg))return null;
     return{analysis:a,alsoClears:[...beforeSigs].filter(sg=>sg!==targetSig&&!after.has(sg))};
   };
-  const clock=(ms,icao,date)=>epochLZ(ms,offFor?offFor(icao,date):null);
+  // LOCAL (ZULUz), matching the results cards. Local comes from getIcaoOffset for
+  // the relevant airport on that leg's date, so it is DST-correct. The calendar
+  // date is prefixed only when the suggested time lands on a different LOCAL day
+  // than the time it replaces — a same-day change reads "04:00 (08:00z)", one
+  // that rolls past midnight says which day. Unknown airport → "??:?? (08:00z)".
+  const clockAt=(ms,refMs,icao,date)=>{
+    const off=offFor?offFor(icao,date):null;
+    const d=new Date(ms),z=_p2(d.getHours())+":"+_p2(d.getMinutes());
+    if(off===null||off===undefined)return"??:?? ("+z+"z)";
+    const loc=m=>{const x=new Date(m),t=x.getHours()*60+x.getMinutes()+Math.round(off*60);
+      const day=new Date(m);day.setDate(day.getDate()+Math.floor(t/1440));
+      return{day,t:((t%1440)+1440)%1440};};
+    const a=loc(ms),r=refMs!=null?loc(refMs):null;
+    const hhmm=_p2(Math.floor(a.t/60))+":"+_p2(a.t%60);
+    const sameDay=r&&a.day.getDate()===r.day.getDate()&&a.day.getMonth()===r.day.getMonth();
+    return(sameDay?"":a.day.getDate()+" "+_MON[a.day.getMonth()]+" ")+hhmm+" ("+z+"z)";
+  };
 
   // Crew candidates for a period, tried in increasing order of disruption.
   const crewOptions=(targetSig,pi,why)=>{
     const out=[],cur=DR[pi].crewMode;
-    for(const n of [3,4,2]){
+    for(const n of [2,3,4]){
       if(n===cur)continue;
       const r=check(targetSig,{overrides:{...base.overrides,[pi]:n}});
       if(!r)continue;
@@ -3608,87 +3624,117 @@ function buildSuggestions(baseLegs,result,cfg,offFor){
   const groups=[];
   result.violations.forEach(v=>{
     const sig=vSig(v),opts=[];
+    // rank orders the group most-practical-first; cost breaks ties within a rank
+    // (smallest offset trim, then smallest delay, then augmentation, then structural).
+    const add=(rank,cost,o)=>{opts.push({...o,_rank:rank,_cost:cost});};
 
     if(v.type==="rest"){
       const i=v.period,cur=DR[i],prev=DR[i-1];
       if(cur&&prev){
-        const fl=cur.legs[0];
-        // A — delay the whole period until the rest requirement is met exactly.
+        const fl=cur.legs[0],shortMin=Math.ceil(v.shortMin);
+        const availOff=prev.p91RestStart?0:Math.max(0,offOf(i-1)-10);   // a 91 tail makes the Off offset irrelevant to rest
+        const availOn=Math.max(0,onOf(i)-30);
+        // Trim the previous period's Off offset alone.
+        if(availOff>=shortMin){
+          const nOff=offOf(i-1)-shortMin;
+          const r=check(sig,{offsets:offsetsFor(i-1,onOf(i-1),nOff)});
+          if(r)add(0,shortMin,{lever:"Trim duty-off offset",
+            text:"Cut DP"+i+" Off offset from "+offOf(i-1)+" to "+nOff+" min",
+            detail:"Ends DP"+i+" duty "+fmtHM(shortMin)+" earlier — exactly the shortfall — without moving a leg.",
+            alsoClears:r.alsoClears,change:{kind:"offset",period:i-1,on:onOf(i-1),off:nOff}});
+        }
+        // Trim this period's On offset alone.
+        if(availOn>=shortMin){
+          const nOn=onOf(i)-shortMin;
+          const r=check(sig,{offsets:offsetsFor(i,nOn,offOf(i))});
+          if(r)add(0,shortMin,{lever:"Trim duty-on offset",
+            text:"Cut DP"+(i+1)+" On offset from "+onOf(i)+" to "+nOn+" min",
+            detail:"Starts DP"+(i+1)+" duty "+fmtHM(shortMin)+" later — exactly the shortfall — without moving a leg.",
+            alsoClears:r.alsoClears,change:{kind:"offset",period:i,on:nOn,off:offOf(i)}});
+        }
+        // Neither reaches alone but together they do — split the shortfall.
+        if(availOff<shortMin&&availOn<shortMin&&availOff+availOn>=shortMin){
+          const takeOff=Math.min(availOff,shortMin),takeOn=shortMin-takeOff;
+          const nOff=offOf(i-1)-takeOff,nOn=onOf(i)-takeOn;
+          const r=check(sig,{offsets:{...base.offsets,[i-1]:{on:onOf(i-1),off:nOff},[i]:{on:nOn,off:offOf(i)}}});
+          if(r)add(0,shortMin,{lever:"Trim both offsets",
+            text:"Cut DP"+i+" Off to "+nOff+" min and DP"+(i+1)+" On to "+nOn+" min",
+            detail:"Neither offset alone covers the "+fmtHM(shortMin)+" shortfall; together they do ("+
+                   takeOff+" min off the tail of DP"+i+", "+takeOn+" min off the front of DP"+(i+1)+").",
+            alsoClears:r.alsoClears});
+        }
+        // Delay the whole period to the earliest legal report time.
         const need=cur.restReq*3600000;
         const from=cur.restStartMs!=null?cur.restStartMs:prev.dutyEnd;
         const delta=Math.ceil((from+need-cur.dutyStart)/60000)*60000;
-        if(delta>0){
-          const gi=legIdxOf(fl);
-          const r=gi>=0?check(sig,{shiftFrom:gi,deltaMs:delta}):null;
-          if(r)opts.push({lever:"Delay report",
-            text:"Delay DP"+(i+1)+" start to "+clock(cur.dutyStart+delta,fl.origin,fl.date),
+        const gi=legIdxOf(fl);
+        if(delta>0&&gi>=0){
+          const r=check(sig,{shiftFrom:gi,deltaMs:delta});
+          if(r)add(1,delta/60000,{lever:"Delay report",
+            text:"Delay DP"+(i+1)+" start to "+clockAt(cur.dutyStart+delta,cur.dutyStart,fl.origin,fl.date),
             detail:fmtHM(delta/60000)+" later — first leg "+fl.origin+"→"+fl.dest+" moves to "+
-                   clock(fl.depEpoch+delta,fl.origin,fl.date)+", giving exactly the "+cur.restReq+"h required"+
+                   clockAt(fl.depEpoch+delta,fl.depEpoch,fl.origin,fl.date)+", giving exactly the "+cur.restReq+"h required"+
                    (cur.restFromP91?" measured from the back-end Part 91 arrival":"")+".",
             tradeoff:"Pushes every later leg back by the same "+fmtHM(delta/60000)+".",
             alsoClears:r.alsoClears});
         }
-        const shortMin=Math.ceil(v.shortMin);
-        // B — take the shortfall out of the previous period's Off offset.
-        if(!prev.p91RestStart){
-          const newOff=offOf(i-1)-shortMin;
-          if(newOff>=10){
-            const r=check(sig,{offsets:offsetsFor(i-1,onOf(i-1),newOff)});
-            if(r)opts.push({lever:"Trim duty-off offset",
-              text:"Cut DP"+i+" Off offset from "+offOf(i-1)+" to "+newOff+" min",
-              detail:"Ends DP"+i+" duty "+fmtHM(shortMin)+" earlier, which is exactly the shortfall.",
-              alsoClears:r.alsoClears,change:{kind:"offset",period:i-1,on:onOf(i-1),off:newOff}});
-          }
-        }
-        // C — or out of this period's On offset.
-        const newOn=onOf(i)-shortMin;
-        if(newOn>=30){
-          const r=check(sig,{offsets:offsetsFor(i,newOn,offOf(i))});
-          if(r)opts.push({lever:"Trim duty-on offset",
-            text:"Cut DP"+(i+1)+" On offset from "+onOf(i)+" to "+newOn+" min",
-            detail:"Starts DP"+(i+1)+" duty "+fmtHM(shortMin)+" later without moving any leg.",
-            alsoClears:r.alsoClears,change:{kind:"offset",period:i,on:newOn,off:offOf(i)}});
-        }
-        // D — crew config, which only helps when it LOWERS the required rest.
-        crewOptions(sig,i-1,lim=>"Rest after DP"+i+" becomes "+lim.restAfter+"h, at or below the "+
-          cur.restReq+"h currently required.").forEach(o=>opts.push(o));
+        // Crew config — only ever listed when it genuinely lowers the required rest.
+        crewOptions(sig,i-1,lim=>"Rest owed after DP"+i+" becomes "+lim.restAfter+"h, at or below the "+
+          cur.restReq+"h currently required.").forEach(o=>add(2,o.change.crew,o));
       }
     }
 
     if(v.type==="duty"||v.type==="flight"){
-      const i=v.period,dp=DR[i];
-      const kind=v.type==="duty"?"duty":"flight";
+      const i=v.period,dp=DR[i],kind=v.type,excess=v.actualMin-v.limitMin;
       crewOptions(sig,i,lim=>"Raises the "+kind+" limit to "+fmtHM((kind==="duty"?lim.duty:lim.flight)*60)+
-        ", clearing the actual "+fmtHM(v.actualMin)+".").forEach(o=>opts.push(o));
-      const excess=v.actualMin-v.limitMin;
-      if(v.type==="duty"){
-        // Duty = flight block + On + Off, so trimming the offsets is a direct lever.
+        ", clearing the actual "+fmtHM(v.actualMin)+".").forEach(o=>add(2,o.change.crew,o));
+
+      if(kind==="duty"){
+        // Duty = block time + On + Off, so each offset is a direct lever.
         const availOff=Math.max(0,offOf(i)-10),availOn=Math.max(0,onOf(i)-30);
-        if(availOff+availOn>=excess){
+        if(availOff>=excess){
+          const nOff=offOf(i)-excess;
+          const r=check(sig,{offsets:offsetsFor(i,onOf(i),nOff)});
+          if(r)add(0,excess,{lever:"Trim duty-off offset",
+            text:"Cut DP"+(i+1)+" Off offset from "+offOf(i)+" to "+nOff+" min",
+            detail:"Removes exactly "+fmtHM(excess)+" of duty from the tail, bringing DP"+(i+1)+" to the "+fmtHM(v.limitMin)+" limit.",
+            alsoClears:r.alsoClears,change:{kind:"offset",period:i,on:onOf(i),off:nOff}});
+        }
+        if(availOn>=excess){
+          const nOn=onOf(i)-excess;
+          const r=check(sig,{offsets:offsetsFor(i,nOn,offOf(i))});
+          if(r)add(0,excess,{lever:"Trim duty-on offset",
+            text:"Cut DP"+(i+1)+" On offset from "+onOf(i)+" to "+nOn+" min",
+            detail:"Removes exactly "+fmtHM(excess)+" of duty from the front, bringing DP"+(i+1)+" to the "+fmtHM(v.limitMin)+" limit.",
+            alsoClears:r.alsoClears,change:{kind:"offset",period:i,on:nOn,off:offOf(i)}});
+        }
+        if(availOff<excess&&availOn<excess&&availOff+availOn>=excess){
           const takeOff=Math.min(availOff,excess),takeOn=excess-takeOff;
           const nOff=offOf(i)-takeOff,nOn=onOf(i)-takeOn;
           const r=check(sig,{offsets:offsetsFor(i,nOn,nOff)});
-          if(r)opts.push({lever:"Trim duty offsets",
+          if(r)add(0,excess,{lever:"Trim both offsets",
             text:"Set DP"+(i+1)+" offsets to On "+nOn+" min / Off "+nOff+" min",
-            detail:"Removes exactly "+fmtHM(excess)+" of duty"+(takeOn?" ("+takeOff+" min off the tail, "+takeOn+" min off the front)":"")+
-                   ", bringing DP"+(i+1)+" to the "+fmtHM(v.limitMin)+" limit.",
+            detail:"Neither offset alone covers the "+fmtHM(excess)+" overrun; together they do ("+
+                   takeOff+" min off the tail, "+takeOn+" min off the front).",
             alsoClears:r.alsoClears,change:{kind:"offset",period:i,on:nOn,off:nOff}});
         }
       }
-      if(v.type==="flight"){
-        // Move a leg out of the period — verified by removing it from the trip.
-        for(let li=dp.legs.length-1;li>=0;li--){
-          const leg=dp.legs[li],gi=legIdxOf(leg);
-          if(gi<0||leg.flightMins<excess)continue;
+
+      if(kind==="flight"){
+        // Every leg whose removal brings the period inside the limit.
+        dp.legs.forEach(leg=>{
+          const gi=legIdxOf(leg);
+          if(gi<0||leg.flightMins<excess)return;
           const r=check(sig,{dropIdx:gi});
-          if(r){opts.push({lever:"Move a leg",
+          if(r)add(3,leg.flightMins,{lever:"Move a leg",
             text:"Move Leg "+(gi+1)+" ("+leg.origin+"→"+leg.dest+", "+fmtHM(leg.flightMins)+") to another duty period",
             detail:"Drops DP"+(i+1)+" flight time to "+fmtHM(v.actualMin-leg.flightMins)+", inside the "+fmtHM(v.limitMin)+" limit.",
             tradeoff:"The receiving duty period needs room for it under its own limits.",
-            alsoClears:r.alsoClears});break;}
-        }
+            alsoClears:r.alsoClears});
+        });
       }
-      // Split the period at its longest internal gap, if that gap can serve as rest.
+
+      // Split at the longest internal gap, if that gap can stand as legal rest.
       let bestGap=null;
       for(let li=0;li<dp.legs.length-1;li++){
         const g=dp.legs[li+1].depEpoch-dp.legs[li].arrEpoch;
@@ -3697,9 +3743,9 @@ function buildSuggestions(baseLegs,result,cfg,offFor){
       if(bestGap){
         const gi=legIdxOf(dp.legs[bestGap.li]);
         const r=gi>=0?check(sig,{splitAfter:gi}):null;
-        if(r)opts.push({lever:"Split the duty period",
+        if(r)add(3,1e9,{lever:"Split the duty period",
           text:"Split DP"+(i+1)+" after Leg "+(gi+1)+" — take the "+fmtHM(Math.round(bestGap.g/60000))+" gap as rest",
-          detail:"Splits into two duty periods, each inside its own "+kind+" limit.",
+          detail:"Makes two duty periods, each inside its own "+kind+" limit.",
           alsoClears:r.alsoClears});
       }
     }
@@ -3707,30 +3753,39 @@ function buildSuggestions(baseLegs,result,cfg,offFor){
     if(v.type==="rolling24"){
       const i=v.period;
       crewOptions(sig,i,lim=>"Raises the rolling-24 limit to "+fmtHM(lim.rolling24*60)+
-        ", so the "+fmtHM(v.totalMin)+" peak window now fits.").forEach(o=>opts.push(o));
-      // Delay the last leg in the busiest window until the window drops under the
-      // limit. Smallest 5-minute step that the engine confirms.
+        ", so the "+fmtHM(v.totalMin)+" peak window now fits.").forEach(o=>add(2,o.change.crew,o));
+      // Delay the last leg in the busiest window until enough of it falls outside.
       const tail=v.parts&&v.parts.length?v.parts[v.parts.length-1].legIdx:null;
       if(tail!=null&&AL[tail]){
         const leg=AL[tail];
         for(let m=5;m<=16*60;m+=5){
           const r=check(sig,{shiftFrom:tail,deltaMs:m*60000});
-          if(r){
-            const pk=r.analysis.rollingPeak;
-            opts.push({lever:"Delay a leg",
-              text:"Delay Leg "+(tail+1)+" ("+leg.origin+"→"+leg.dest+") to "+clock(leg.depEpoch+m*60000,leg.origin,leg.date),
-              detail:fmtHM(m)+" later — enough of it falls outside the 24-hour window to bring the peak from "+
-                     fmtHM(v.totalMin)+" to "+(pk?fmtHM(pk.totalMin):"under the limit")+", inside the "+fmtHM(v.limitMin)+" limit.",
-              tradeoff:"Pushes every later leg back by the same "+fmtHM(m)+".",
-              alsoClears:r.alsoClears});
-            break;
-          }
+          if(!r)continue;
+          const pk=r.analysis.rollingPeak;
+          add(1,m,{lever:"Delay a leg",
+            text:"Delay Leg "+(tail+1)+" ("+leg.origin+"→"+leg.dest+") to "+clockAt(leg.depEpoch+m*60000,leg.depEpoch,leg.origin,leg.date),
+            detail:fmtHM(m)+" later — enough of it falls outside the 24-hour window to bring the peak from "+
+                   fmtHM(v.totalMin)+" to "+(pk?fmtHM(pk.totalMin):"under the limit")+", inside the "+fmtHM(v.limitMin)+" limit.",
+            tradeoff:"Pushes every later leg back by the same "+fmtHM(m)+".",
+            alsoClears:r.alsoClears});
+          break;
         }
+      }
+      // Break the window's first leg out behind a rest. A 24-hour window is a wall
+      // clock, not a duty clock, so this rarely helps — but it is tried, and listed
+      // if the engine says it clears.
+      const head=v.parts&&v.parts.length?v.parts[0].legIdx:null;
+      if(head!=null&&head>0){
+        const r=check(sig,{splitAfter:head-1});
+        if(r)add(3,1e9,{lever:"Add rest before the window",
+          text:"Take a rest before Leg "+(head+1)+" ("+AL[head].origin+"→"+AL[head].dest+")",
+          detail:"Starts a new duty period at the head of the busiest window, which the engine confirms clears it.",
+          alsoClears:r.alsoClears});
       }
     }
 
-    if(opts.length)groups.push({sig,violation:v,options:opts.slice(0,4)});
-    else groups.push({sig,violation:v,options:[]});
+    opts.sort((x,y)=>x._rank-y._rank||x._cost-y._cost);
+    groups.push({sig,violation:v,options:opts.map(({_rank,_cost,...o})=>o)});
   });
   return groups;
 }
