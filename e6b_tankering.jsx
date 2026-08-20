@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.66";
+const APP_VERSION="1.67";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
