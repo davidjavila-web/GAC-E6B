@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 const CURRENCIES=[{code:"USD",symbol:"$"},{code:"EUR",symbol:"€"},{code:"GBP",symbol:"£"},{code:"CAD",symbol:"C$"},{code:"AED",symbol:"د.إ"}];
-const APP_VERSION="1.70";
+const APP_VERSION="1.71";
 const LBS_PER_GAL=6.7,LBS_PER_L=1.77;
 
 // ── Numeric parsing ───────────────────────────────────────────────────────
@@ -3304,6 +3304,18 @@ function epochLZ(ms,off){
   const t=((total%1440)+1440)%1440;
   return`${ld.getDate()} ${_MON[ld.getMonth()]} ${_p2(Math.floor(t/60))}:${_p2(t%60)} (${z}z)`;
 }
+// "YYYY-MM-DD" calendar arithmetic done in UTC, so adding a day can never be
+// bent by the browser's own timezone.
+function isoAddDays(iso,n){
+  if(!iso||!n)return iso||"";
+  const p=String(iso).split("-");
+  if(p.length!==3)return iso;
+  const d=new Date(Date.UTC(toNum(p[0]),toNum(p[1])-1,toNum(p[2])));
+  if(!Number.isFinite(d.getTime()))return iso;
+  d.setUTCDate(d.getUTCDate()+n);
+  return d.getUTCFullYear()+"-"+_p2(d.getUTCMonth()+1)+"-"+_p2(d.getUTCDate());
+}
+
 function fmtHM(mins){const h=Math.floor(mins/60);const m=Math.round(mins%60);return`${h}:${String(m).padStart(2,"0")}`;}
 function fmtHrs2(hrs){const h=Math.floor(hrs);const m=Math.round((hrs-h)*60);return`${h}:${String(m).padStart(2,"0")}`;}
 
@@ -4084,8 +4096,16 @@ function FlightDutyCalc(){
     ingestParsed(p);
   }
 
-  function addManualLeg(){setManualLegs(ls=>[...ls,{origin:ls[ls.length-1]?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",date:ls[ls.length-1]?.date||"",mode:ls[ls.length-1]?.mode||"Z",crewMode:ls[ls.length-1]?.crewMode||crewMode,isPart91:false}]);}
-  function removeManualLeg(i){setManualLegs(ls=>ls.length<=1?ls:ls.filter((_,j)=>j!==i));}
+  function addManualLeg(){setManualLegs(ls=>{
+    const last=ls[ls.length-1];
+    // Default to the day the previous leg actually lands (UTC), not a copy of its
+    // departure date — that is what produced same-date legs whose arrival had
+    // already crossed midnight.
+    return[...ls,{origin:last?.dest||"",dest:"",depTime:"",arrTime:"",depInput:"",arrInput:"",
+      date:last?legArrivalDate(last):"",dateTouched:false,
+      mode:last?.mode||"Z",crewMode:last?.crewMode||crewMode,isPart91:false}];
+  });}
+  function removeManualLeg(i){setManualLegs(ls=>ls.length<=1?ls:syncLegDates(ls.filter((_,j)=>j!==i)));}
 
   // DST-aware UTC offset for an ICAO on a given date (string "YYYY-MM-DD" or the
   // {day,month,year2} object). Primary: ICAO_IANA (DST for the date); secondary:
@@ -4121,8 +4141,65 @@ function FlightDutyCalc(){
   function localFromUtc(zulu,off){const m=hhmmToMin(zulu);return m===null?"":minToHHMM(m+(off||0)*60);}
   function utcFromLocal(local,off){const m=hhmmToMin(local);return m===null?"":minToHHMM(m-(off||0)*60);}
 
+  // ── Automatic day rollover ────────────────────────────────────────────
+  // ml.date is ALWAYS the canonical UTC departure date. Everything below is
+  // display or defaulting on top of that; the stored moment never moves when the
+  // Z/L toggle flips.
+
+  // Whole days between a leg's departure and its arrival, measured in the leg's
+  // CURRENTLY SELECTED mode: Z compares zulu civil days, L compares local civil
+  // days at each end. A leg can roll over in one and not the other — westbound
+  // long-haul can even land on the previous local day. null when an airport
+  // offset is unknown in L mode, so the UI can stay silent rather than guess.
+  function legDayShift(ml){
+    const dep=hhmmToMin(ml.depTime||""),arr=hhmmToMin(ml.arrTime||"");
+    if(dep===null||arr===null)return 0;
+    let ft=arr-dep;if(ft<0)ft+=1440;
+    if((ml.mode||"Z")!=="L")return Math.floor((dep+ft)/1440);
+    const oO=tzOffsetFor(ml.origin,ml.date),oD=tzOffsetFor(ml.dest,ml.date);
+    if(oO===null||oD===null)return null;
+    return Math.floor((dep+ft+Math.round(oD*60))/1440)-Math.floor((dep+Math.round(oO*60))/1440);
+  }
+
+  // The leg's UTC arrival date — the earliest date the NEXT leg may depart.
+  function legArrivalDate(ml){
+    if(!ml.date)return"";
+    const dep=hhmmToMin(ml.depTime||""),arr=hhmmToMin(ml.arrTime||"");
+    if(dep===null||arr===null)return ml.date;
+    let ft=arr-dep;if(ft<0)ft+=1440;
+    return isoAddDays(ml.date,Math.floor((dep+ft)/1440));
+  }
+
+  // In L mode the picker shows the LOCAL departure date, which can sit a day
+  // either side of the canonical UTC one. These two are inverses.
+  function legDateShown(ml){
+    if(!ml.date||(ml.mode||"Z")!=="L")return ml.date||"";
+    const dep=hhmmToMin(ml.depTime||""),off=tzOffsetFor(ml.origin,ml.date);
+    if(dep===null||off===null)return ml.date;
+    return isoAddDays(ml.date,Math.floor((dep+Math.round(off*60))/1440));
+  }
+  function legDateFromShown(ml,shown){
+    if(!shown||(ml.mode||"Z")!=="L")return shown;
+    const depL=hhmmToMin(ml.depInput||""),off=tzOffsetFor(ml.origin,shown);
+    if(depL===null||off===null)return shown;
+    return isoAddDays(shown,Math.floor((depL-Math.round(off*60))/1440));
+  }
+
+  // A leg can never depart before the previous one arrived. A date the user has
+  // not touched tracks that minimum automatically; one they set is only ever
+  // pushed UP to it, so a deliberate long layover survives.
+  function syncLegDates(ls){
+    const out=ls.map(l=>({...l}));
+    for(let i=1;i<out.length;i++){
+      const min=legArrivalDate(out[i-1]);
+      if(!min)continue;
+      if(!out[i].dateTouched||!out[i].date||out[i].date<min)out[i].date=min;
+    }
+    return out;
+  }
+
   function updateManualLeg(i,field,val){
-    setManualLegs(ls=>ls.map((l,j)=>{
+    setManualLegs(ls=>syncLegDates(ls.map((l,j)=>{
       if(j!==i)return l;
       const next={...l,[field]:val};
       // Mode L pins the canonical UTC moment — switching ICAOs re-derives the
@@ -4133,19 +4210,26 @@ function FlightDutyCalc(){
       if(next.mode==="L"&&field==="dest"){
         next.arrInput=next.arrTime?localFromUtc(next.arrTime,tzOffsetFor(val,next.date)||0):"";
       }
-      // Changing the date can change the DST offset → keep the displayed LOCAL
-      // time fixed and recompute the canonical UTC for the new date.
-      if(next.mode==="L"&&field==="date"){
-        if(next.depInput)next.depTime=utcFromLocal(next.depInput,tzOffsetFor(next.origin,next.date)||0);
-        if(next.arrInput)next.arrTime=utcFromLocal(next.arrInput,tzOffsetFor(next.dest,next.date)||0);
+      if(field==="date"){
+        // The picker shows the date in the leg's displayed mode; store the
+        // canonical UTC one. Marking it touched stops the auto-default from
+        // overwriting a layover the user chose.
+        next.dateTouched=true;
+        next.date=legDateFromShown(l,val);
+        // A different date can mean a different DST offset → hold the displayed
+        // LOCAL time and recompute the canonical UTC behind it.
+        if(next.mode==="L"){
+          if(next.depInput)next.depTime=utcFromLocal(next.depInput,tzOffsetFor(next.origin,next.date)||0);
+          if(next.arrInput)next.arrTime=utcFromLocal(next.arrInput,tzOffsetFor(next.dest,next.date)||0);
+        }
       }
       return next;
-    }));
+    })));
   }
   // Switch a leg's Z/L mode. The canonical UTC (depTime/arrTime) is preserved;
   // only the input buffer changes to show the same moment in the new mode.
   function setManualLegMode(i,mode){
-    setManualLegs(ls=>ls.map((l,j)=>{
+    setManualLegs(ls=>syncLegDates(ls.map((l,j)=>{
       if(j!==i)return l;
       const next={...l,mode};
       if(mode==="Z"){next.depInput=next.depTime||"";next.arrInput=next.arrTime||"";}
@@ -4154,14 +4238,14 @@ function FlightDutyCalc(){
         next.arrInput=next.arrTime?localFromUtc(next.arrTime,tzOffsetFor(next.dest,next.date)||0):"";
       }
       return next;
-    }));
+    })));
   }
   // Single-field time setter. The input buffer (depInput/arrInput) always
   // mirrors what the user sees. The canonical UTC value (depTime/arrTime) is
   // recomputed when the input is complete (5 chars) and cleared on partial.
   function setManualLegTime(i,side,raw){
     const v=normalizeHHMM(raw);
-    setManualLegs(ls=>ls.map((l,j)=>{
+    setManualLegs(ls=>syncLegDates(ls.map((l,j)=>{
       if(j!==i)return l;
       const next={...l};
       const inKey=side==="dep"?"depInput":"arrInput";
@@ -4175,7 +4259,7 @@ function FlightDutyCalc(){
         next[utcKey]=utcFromLocal(v,off);
       }
       return next;
-    }));
+    })));
   }
 
   function parseManualLegs(){
@@ -4324,7 +4408,7 @@ function FlightDutyCalc(){
     const mode=isLocal?"L":"Z";
     const depInput=isLocal?(l.origLocalDep||localFromUtc(depT,tzOffsetFor(l.origin,l.date)||0)):depT;
     const arrInput=isLocal?(l.origLocalArr||localFromUtc(arrT,tzOffsetFor(l.dest,l.date)||0)):arrT;
-    return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode,isPart91:!!l.isPart91};
+    return{origin:l.origin||"",dest:l.dest||"",depTime:depT,arrTime:arrT,depInput,arrInput,date:dateStr,mode,crewMode:l.crewMode||crewMode,isPart91:!!l.isPart91,dateTouched:!!dateStr};
   }
   // Append screenshot-parsed legs to the manual-entry list. Never wipes entered legs —
   // only replaces a single still-blank placeholder card; otherwise appends to the bottom.
@@ -4390,7 +4474,8 @@ function FlightDutyCalc(){
           {/* Header: LEG badge · date · Z|L (right) · remove */}
           <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}>
             <span style={{background:tint.badge,color:"#fff",borderRadius:6,padding:"3px 9px",fontSize:11,fontWeight:800,letterSpacing:.4,flexShrink:0}}>LEG {i+1}</span>
-            <input type="date" value={ml.date} onChange={e=>updateManualLeg(i,"date",e.target.value)}
+            <input type="date" value={legDateShown(ml)} onChange={e=>updateManualLeg(i,"date",e.target.value)}
+              title={isL?"Local departure date at "+(ml.origin||"origin")+" — stored as the zulu date":"Zulu departure date"}
               style={{flex:"1 1 auto",minWidth:0,background:C.card,border:"1.5px solid "+C.border,borderRadius:8,padding:"6px 6px",color:C.text,fontSize:11,fontWeight:700,boxSizing:"border-box"}}/>
             <div style={{display:"flex",background:C.card,border:"1px solid "+C.border,borderRadius:6,padding:2,flexShrink:0}}>
               {["Z","L"].map(m=>(<button key={m} onClick={()=>setManualLegMode(i,m)} style={{padding:"4px 9px",borderRadius:4,border:"none",background:mode===m?(m==="L"?C.amber:C.accent):"transparent",color:mode===m?"#fff":C.muted,fontSize:11,fontWeight:800,cursor:"pointer",letterSpacing:.5}}>{m}</button>))}
@@ -4414,6 +4499,18 @@ function FlightDutyCalc(){
               <input value={ml.dest} onChange={e=>updateManualLeg(i,"dest",e.target.value.toUpperCase().slice(0,4))} placeholder="ICAO" maxLength={4} style={{...icaoSt,borderColor:ml.dest&&ml.dest.length<4?C.red:C.border}}/>
               <input value={ml.arrInput||""} onChange={e=>setManualLegTime(i,"arr",e.target.value)} placeholder="HH:MM" maxLength={5} inputMode="numeric" style={timeSt}/>
               <div style={subLbl}>{mode==="Z"?"Zulu":"Local"+(ml.dest?" "+ml.dest:"")}{arrUnknown?" ?":""}</div>
+              {(()=>{
+                // Rollover as seen in THIS leg's mode — a leg can cross midnight
+                // in zulu but not local, or land on the previous local day.
+                const sh=legDayShift(ml);
+                if(sh===null||!sh)return null;
+                const up=sh>0;
+                return<div style={{marginTop:4,display:"inline-block",background:(up?C.gold:C.accent)+"22",
+                  color:up?C.gold:C.accent,borderRadius:5,padding:"1px 6px",fontSize:9.5,fontWeight:800,letterSpacing:.3}}
+                  title={"Arrival is "+Math.abs(sh)+" "+(Math.abs(sh)>1?"days":"day")+" "+(up?"after":"before")+" departure in "+(mode==="Z"?"zulu":"local")+" time"}>
+                  {up?"+":"−"}{Math.abs(sh)} day{Math.abs(sh)>1?"s":""}
+                </div>;
+              })()}
             </div>
           </div>
           {/* Crew selector + operating rule — full width */}
